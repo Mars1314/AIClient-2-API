@@ -537,6 +537,77 @@ async initializeAuth(forceRefresh = false) {
     }
 
     /**
+     * 深度清理 JSON Schema，移除 AWS CodeWhisperer API 不支持的字段
+     * @param {Object} schema - 原始 JSON Schema
+     * @returns {Object} 清理后的 schema
+     */
+    cleanInputSchema(schema) {
+        if (!schema || typeof schema !== 'object') {
+            return schema;
+        }
+
+        // 需要移除的字段列表 - AWS CodeWhisperer API 不支持这些 JSON Schema 字段
+        const fieldsToRemove = [
+            '$schema',
+            'additionalProperties',
+            'default',
+            'minimum',
+            'maximum',
+            'minLength',
+            'maxLength',
+            'minItems',
+            'maxItems',
+            'pattern',
+            'format',
+            'examples',
+            'const',
+            'exclusiveMinimum',
+            'exclusiveMaximum',
+            'enum',           // 枚举值
+            'oneOf',          // 联合类型
+            'anyOf',          // 任意类型
+            'allOf',          // 所有类型
+            'not',            // 否定类型
+            'if',             // 条件
+            'then',           // 条件
+            'else',           // 条件
+            'contentMediaType',
+            'contentEncoding',
+            'definitions',
+            '$ref',
+            '$id',
+            '$comment'
+        ];
+
+        const cleaned = {};
+        
+        for (const [key, value] of Object.entries(schema)) {
+            // 跳过需要移除的字段
+            if (fieldsToRemove.includes(key)) {
+                continue;
+            }
+            
+            // 递归处理嵌套对象
+            if (key === 'properties' && typeof value === 'object') {
+                cleaned[key] = {};
+                for (const [propKey, propValue] of Object.entries(value)) {
+                    cleaned[key][propKey] = this.cleanInputSchema(propValue);
+                }
+            } else if (key === 'items' && typeof value === 'object') {
+                cleaned[key] = this.cleanInputSchema(value);
+            } else if (Array.isArray(value)) {
+                cleaned[key] = value.map(item => 
+                    typeof item === 'object' ? this.cleanInputSchema(item) : item
+                );
+            } else {
+                cleaned[key] = value;
+            }
+        }
+        
+        return cleaned;
+    }
+
+    /**
      * Build CodeWhisperer request from OpenAI messages
      */
     buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null) {
@@ -598,15 +669,66 @@ async initializeAuth(forceRefresh = false) {
         const codewhispererModel = MODEL_MAPPING[model] || MODEL_MAPPING[this.modelName];
         
         let toolsContext = {};
+        // 启用 tools，但使用简化的格式
+        // AWS CodeWhisperer API 对工具有严格限制：
+        // - 工具描述长度限制
+        // - 属性描述长度限制
+        // - 工具数量限制
+        const MAX_TOOL_DESCRIPTION_LENGTH = 1000;  // 工具描述最大长度
+        const MAX_PROPERTY_DESCRIPTION_LENGTH = 500;  // 属性描述最大长度
+        const MAX_TOOLS_COUNT = 64;  // 最大工具数量
+        
         if (tools && Array.isArray(tools) && tools.length > 0) {
+            // 限制工具数量
+            const limitedTools = tools.slice(0, MAX_TOOLS_COUNT);
+            if (tools.length > MAX_TOOLS_COUNT) {
+                console.warn(`[Kiro] Tools count (${tools.length}) exceeds limit (${MAX_TOOLS_COUNT}), truncating to first ${MAX_TOOLS_COUNT} tools`);
+            }
+            
             toolsContext = {
-                tools: tools.map(tool => ({
-                    toolSpecification: {
-                        name: tool.name,
-                        description: tool.description || "",
-                        inputSchema: { json: tool.input_schema || {} }
+                tools: limitedTools.map(tool => {
+                    // 深度清理 input_schema，移除 AWS API 不支持的字段
+                    const inputSchema = this.cleanInputSchema(tool.input_schema || {});
+                    
+                    // 简化 inputSchema，只保留 type, properties, required
+                    const simplifiedSchema = {
+                        type: inputSchema.type || 'object'
+                    };
+                    if (inputSchema.properties) {
+                        simplifiedSchema.properties = {};
+                        for (const [key, value] of Object.entries(inputSchema.properties)) {
+                            // 只保留 type 和 description，并截断描述
+                            simplifiedSchema.properties[key] = {
+                                type: value.type || 'string'
+                            };
+                            if (value.description) {
+                                // 截断属性描述
+                                let propDesc = value.description;
+                                if (propDesc.length > MAX_PROPERTY_DESCRIPTION_LENGTH) {
+                                    propDesc = propDesc.substring(0, MAX_PROPERTY_DESCRIPTION_LENGTH) + '...';
+                                }
+                                simplifiedSchema.properties[key].description = propDesc;
+                            }
+                        }
                     }
-                }))
+                    if (inputSchema.required && Array.isArray(inputSchema.required)) {
+                        simplifiedSchema.required = inputSchema.required;
+                    }
+                    
+                    // 截断工具描述
+                    let toolDescription = tool.description || "";
+                    if (toolDescription.length > MAX_TOOL_DESCRIPTION_LENGTH) {
+                        toolDescription = toolDescription.substring(0, MAX_TOOL_DESCRIPTION_LENGTH) + '...';
+                    }
+                    
+                    return {
+                        toolSpecification: {
+                            name: tool.name,
+                            description: toolDescription,
+                            inputSchema: { json: simplifiedSchema }
+                        }
+                    };
+                })
             };
         }
 
@@ -640,9 +762,21 @@ async initializeAuth(forceRefresh = false) {
         }
 
         // Add remaining user/assistant messages to history
+        // AWS CodeWhisperer API 要求 history 中的消息必须是 user 和 assistant 交替出现
+        let lastHistoryRole = history.length > 0 ? 'user' : null; // 如果有 system prompt，最后一条是 user
+        
         for (let i = startIndex; i < processedMessages.length - 1; i++) {
             const message = processedMessages[i];
             if (message.role === 'user') {
+                // 如果上一条也是 user，需要插入一个占位的 assistant 消息
+                if (lastHistoryRole === 'user') {
+                    history.push({
+                        assistantResponseMessage: {
+                            content: 'I understand.'
+                        }
+                    });
+                }
+                
                 let userInputMessage = {
                     content: '',
                     modelId: codewhispererModel,
@@ -692,6 +826,7 @@ async initializeAuth(forceRefresh = false) {
                 }
                 
                 history.push({ userInputMessage });
+                lastHistoryRole = 'user';
             } else if (message.role === 'assistant') {
                 let assistantResponseMessage = {
                     content: ''
@@ -719,8 +854,38 @@ async initializeAuth(forceRefresh = false) {
                     assistantResponseMessage.toolUses = toolUses;
                 }
                 
-                history.push({ assistantResponseMessage });
+                // 只有当 content 非空或有 toolUses 时才添加到 history
+                // AWS API 不接受空内容的 assistantResponseMessage
+                if (assistantResponseMessage.content || toolUses.length > 0) {
+                    // 如果上一条也是 assistant，需要插入一个占位的 user 消息
+                    if (lastHistoryRole === 'assistant') {
+                        history.push({
+                            userInputMessage: {
+                                content: 'Continue.',
+                                modelId: codewhispererModel,
+                                origin: KIRO_CONSTANTS.ORIGIN_AI_EDITOR
+                            }
+                        });
+                    }
+                    
+                    // 如果 content 为空但有 toolUses，设置一个占位内容
+                    if (!assistantResponseMessage.content && toolUses.length > 0) {
+                        assistantResponseMessage.content = '[Tool calls]';
+                    }
+                    history.push({ assistantResponseMessage });
+                    lastHistoryRole = 'assistant';
+                }
             }
+        }
+        
+        // 确保 history 最后一条是 assistant 消息（如果有 history 的话）
+        // 因为 currentMessage 是 user 消息，需要交替
+        if (history.length > 0 && lastHistoryRole === 'user') {
+            history.push({
+                assistantResponseMessage: {
+                    content: 'I understand. How can I help you?'
+                }
+            });
         }
 
         // Build current message
@@ -854,7 +1019,10 @@ async initializeAuth(forceRefresh = false) {
             request.profileArn = this.profileArn;
         }
         
-        // fs.writeFile('claude-kiro-request'+Date.now()+'.json', JSON.stringify(request));
+        // 调试：将请求写入文件以便分析
+        fs.writeFile('claude-kiro-request-debug.json', JSON.stringify(request, null, 2)).catch(err => {
+            console.error('[Kiro] Failed to write debug request file:', err.message);
+        });
         return request;
     }
 
@@ -1007,6 +1175,12 @@ async initializeAuth(forceRefresh = false) {
                 return this.callApi(method, model, body, isRetry, retryCount + 1);
             }
 
+            // 对于 400 错误，尝试获取更详细的错误信息
+            if (error.response?.status === 400) {
+                const errorData = error.response?.data;
+                console.error('[Kiro] API call failed with 400 Bad Request. Response data:', 
+                    typeof errorData === 'string' ? errorData : JSON.stringify(errorData));
+            }
             console.error('[Kiro] API call failed:', error.message);
             throw error;
         }
@@ -1291,6 +1465,10 @@ async initializeAuth(forceRefresh = false) {
                 return;
             }
 
+            // 对于 400 错误，尝试获取更详细的错误信息
+            if (error.response?.status === 400) {
+                console.error('[Kiro] Stream API call failed with 400 Bad Request. Status:', error.response?.status);
+            }
             console.error('[Kiro] Stream API call failed:', error.message);
             throw error;
         } finally {
