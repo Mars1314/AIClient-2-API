@@ -1,8 +1,8 @@
 {
-  "accessToken": "aoaAAAAAGlCR9olhJl2_ZWb67oyOVgJp-O7LSwCruoiJ0wNgdDHtLirmWMrmV-8a9qBf99EuW-Gn5B0jv_rvqZ5b0Bkc0:MGUCMQCPDsfnOdTXQOAPrMfyu21eyW/j2e9LE0e05YgABJi6dHKaCpPoZlbMXUs0VyQmZrcCMCB+2872Uut+xLvqCScW81X0ADfFAcUg7eHbH832gUW/e1Bnw26qVWaHdCe3L2B7Ww",
+  "accessToken": "aoaAAAAAGlCc_wmgipqSMMBvEDjISBjwKZCjyEY3PCBntr4hZZjnvaSV4-do5jupGQw_1VcJa50ltOusV3lbZq9S8Bkc0:MGUCMH+SwK9rft61Lo3evZc51/QqbqkvtjUEGLQEWxtMcUA1ZDE4XaAPOn42vIlvyiXn0AIxAKpDlD0x7xo5SucUNG5jqfv0UoktygFXJDhjqM4JQa4KIyQP4DxjJsHz8tgh28bwsg",
   "refreshToken": "aorAAAAAGm0UXQl3bCWvrx4g6ZbHraGMSAo69EeahNmZbaNz8U2uUSmvOg2BkatnfiCQh1i0lRiMeuv6X2aP0lI9wBkc0:MGYCMQCgssfxtH2alDTeuEIsmkVFgDBPrYrM0OI1PszzzyB+Mh8O9o8mlh3nlM0dmfxMyJMCMQD8xzg2SIj1OyRWcRDbVxjfDxevVS5kilY1HvXr6l90XTyNjeYvBegSujm3h90KnkQ",
   "profileArn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
-  "expiresAt": "2025-12-17T06:04:11.617Z",
+  "expiresAt": "2025-12-17T09:12:30.488Z",
   "authMethod": "social",
   "provider": "Google"
 }
