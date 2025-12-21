@@ -1,5 +1,5 @@
 import * as fs from 'fs'; // Import fs module
-import { getServiceAdapter } from './adapter.js';
+import { getServiceAdapter, serviceInstances } from './adapter.js';
 import { MODEL_PROVIDER } from './common.js';
 import axios from 'axios';
 
@@ -89,6 +89,9 @@ export class ProviderPoolManager {
                 providerConfig.lastHealthCheckTime = providerConfig.lastHealthCheckTime || null;
                 providerConfig.lastHealthCheckModel = providerConfig.lastHealthCheckModel || null;
                 providerConfig.lastErrorMessage = providerConfig.lastErrorMessage || null;
+                
+                // 用量信息字段（基于用量查询的健康检测）
+                providerConfig.usageInfo = providerConfig.usageInfo || null;
 
                 this.providerStatus[providerType].push({
                     config: providerConfig,
@@ -103,9 +106,11 @@ export class ProviderPoolManager {
      * Selects a provider from the pool for a given provider type.
      * Currently uses a simple round-robin for healthy providers.
      * If requestedModel is provided, providers that don't support the model will be excluded.
+     * If no healthy providers are available, will fallback to unhealthy (but not disabled) providers.
+     * Unhealthy providers that have passed the recovery interval will be automatically re-checked.
      * @param {string} providerType - The type of provider to select (e.g., 'gemini-cli', 'openai-custom').
      * @param {string} [requestedModel] - Optional. The model name to filter providers by.
-     * @returns {object|null} The selected provider's configuration, or null if no healthy provider is found.
+     * @returns {object|null} The selected provider's configuration, or null if no provider is found.
      */
     selectProvider(providerType, requestedModel = null, options = {}) {
         // 参数校验
@@ -115,56 +120,78 @@ export class ProviderPoolManager {
         }
 
         const availableProviders = this.providerStatus[providerType] || [];
-        let availableAndHealthyProviders = availableProviders.filter(p =>
-            p.config.isHealthy && !p.config.isDisabled
-        );
-
-        // 如果指定了模型，则排除不支持该模型的提供商
+        
+        // 过滤出未禁用的 provider（不管健康状态）
+        let enabledProviders = availableProviders.filter(p => !p.config.isDisabled);
+        
+        // 如果指定了模型，排除不支持该模型的提供商
         if (requestedModel) {
-            const modelFilteredProviders = availableAndHealthyProviders.filter(p => {
-                // 如果提供商没有配置 notSupportedModels，则认为它支持所有模型
+            enabledProviders = enabledProviders.filter(p => {
                 if (!p.config.notSupportedModels || !Array.isArray(p.config.notSupportedModels)) {
                     return true;
                 }
-                // 检查 notSupportedModels 数组中是否包含请求的模型，如果包含则排除
                 return !p.config.notSupportedModels.includes(requestedModel);
             });
 
-            if (modelFilteredProviders.length === 0) {
+            if (enabledProviders.length === 0) {
                 this._log('warn', `No available providers for type: ${providerType} that support model: ${requestedModel}`);
                 return null;
             }
-
-            availableAndHealthyProviders = modelFilteredProviders;
-            this._log('debug', `Filtered ${modelFilteredProviders.length} providers supporting model: ${requestedModel}`);
+            this._log('debug', `Filtered ${enabledProviders.length} providers supporting model: ${requestedModel}`);
         }
 
-        if (availableAndHealthyProviders.length === 0) {
-            this._log('warn', `No available and healthy providers for type: ${providerType}`);
+        if (enabledProviders.length === 0) {
+            this._log('warn', `No available providers for type: ${providerType}`);
             return null;
         }
 
+        // 检查不健康的 provider 是否可以尝试恢复（距离上次错误已超过恢复间隔）
+        // 异步触发健康检查，不阻塞当前请求
+        const now = new Date();
+        for (const provider of enabledProviders) {
+            if (!provider.config.isHealthy && provider.config.lastErrorTime) {
+                const timeSinceError = now.getTime() - new Date(provider.config.lastErrorTime).getTime();
+                if (timeSinceError >= this.healthCheckInterval) {
+                    // 超过恢复间隔，异步触发健康检查
+                    this._log('info', `Triggering auto-recovery health check for ${provider.config.uuid} (${providerType}) after ${Math.round(timeSinceError / 60000)} minutes`);
+                    // 更新 lastErrorTime 防止重复触发
+                    provider.config.lastErrorTime = now.toISOString();
+                    // 异步执行健康检查，不阻塞当前请求
+                    this._tryRecoverProvider(providerType, provider.config);
+                }
+            }
+        }
+
+        // 优先选择健康的 provider
+        let candidateProviders = enabledProviders.filter(p => p.config.isHealthy);
+        let isFallback = false;
+        
+        // 如果没有健康的，fallback 到不健康的
+        if (candidateProviders.length === 0) {
+            candidateProviders = enabledProviders;
+            isFallback = true;
+            this._log('warn', `No healthy providers for type: ${providerType}, falling back to unhealthy providers`);
+        }
+
         // 为每个提供商类型和模型组合维护独立的轮询索引
-        // 使用组合键：providerType 或 providerType:model
         const indexKey = requestedModel ? `${providerType}:${requestedModel}` : providerType;
         const currentIndex = this.roundRobinIndex[indexKey] || 0;
         
-        // 使用取模确保索引始终在有效范围内，即使列表长度变化
-        const providerIndex = currentIndex % availableAndHealthyProviders.length;
-        const selected = availableAndHealthyProviders[providerIndex];
+        // 使用取模确保索引始终在有效范围内
+        const providerIndex = currentIndex % candidateProviders.length;
+        const selected = candidateProviders[providerIndex];
         
         // 更新下次轮询的索引
-        this.roundRobinIndex[indexKey] = (currentIndex + 1) % availableAndHealthyProviders.length;
+        this.roundRobinIndex[indexKey] = (currentIndex + 1) % candidateProviders.length;
         
         // 更新使用信息（除非明确跳过）
         if (!options.skipUsageCount) {
             selected.config.lastUsed = new Date().toISOString();
             selected.config.usageCount++;
-            // 使用防抖保存
             this._debouncedSave(providerType);
         }
 
-        this._log('debug', `Selected provider for ${providerType} (round-robin): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
+        this._log('debug', `Selected provider for ${providerType} (round-robin${isFallback ? ', fallback' : ''}): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
         
         return selected.config;
     }
@@ -420,11 +447,19 @@ export class ProviderPoolManager {
     }
 
     /**
+     * 支持基于用量查询的健康检测的提供商类型
+     */
+    static USAGE_BASED_HEALTH_CHECK_PROVIDERS = [
+        MODEL_PROVIDER.KIRO_API
+    ];
+
+    /**
      * Performs an actual health check for a specific provider.
+     * 优先使用基于用量查询的健康检测（不消耗配额），如果不支持则回退到传统方式。
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to check.
      * @param {boolean} forceCheck - If true, ignore checkHealth config and force the check.
-     * @returns {Promise<{success: boolean, modelName: string, errorMessage: string}|null>} - Health check result object or null if check not implemented.
+     * @returns {Promise<{success: boolean, modelName: string, errorMessage: string, usageInfo: object}|null>} - Health check result object or null if check not implemented.
      */
     async _checkProviderHealth(providerType, providerConfig, forceCheck = false) {
         // 确定健康检查使用的模型名称
@@ -434,11 +469,6 @@ export class ProviderPoolManager {
         // 如果未启用健康检查且不是强制检查，返回 null
         if (!providerConfig.checkHealth && !forceCheck) {
             return null;
-        }
-
-        if (!modelName) {
-            this._log('warn', `Unknown provider type for health check: ${providerType}`);
-            return { success: false, modelName: null, errorMessage: 'Unknown provider type for health check' };
         }
 
         // 使用内部服务适配器方式进行健康检查
@@ -456,6 +486,22 @@ export class ProviderPoolManager {
         });
 
         const serviceAdapter = getServiceAdapter(tempConfig);
+
+        // 优先使用基于用量查询的健康检测（不消耗配额）
+        if (ProviderPoolManager.USAGE_BASED_HEALTH_CHECK_PROVIDERS.includes(providerType)) {
+            const usageResult = await this._checkProviderHealthByUsage(providerType, serviceAdapter, providerConfig);
+            if (usageResult !== null) {
+                return usageResult;
+            }
+            // 如果用量查询失败，回退到传统方式
+            this._log('debug', `Usage-based health check not available for ${providerConfig.uuid}, falling back to traditional method`);
+        }
+
+        // 传统健康检测方式（发送请求）
+        if (!modelName) {
+            this._log('warn', `Unknown provider type for health check: ${providerType}`);
+            return { success: false, modelName: null, errorMessage: 'Unknown provider type for health check' };
+        }
         
         // 获取所有可能的请求格式
         const healthCheckRequests = this._buildHealthCheckRequests(providerType, modelName);
@@ -480,6 +526,200 @@ export class ProviderPoolManager {
         // 所有尝试都失败
         this._log('error', `Health check failed for ${providerType} after ${maxRetries} attempts: ${lastError?.message}`);
         return { success: false, modelName, errorMessage: lastError?.message || 'All health check attempts failed' };
+    }
+
+    /**
+     * 基于用量查询的健康检测
+     * 通过查询配额/余额来判断账号是否健康，不消耗实际配额
+     * @private
+     * @param {string} providerType - 提供商类型
+     * @param {object} serviceAdapter - 服务适配器实例
+     * @param {object} providerConfig - 提供商配置
+     * @returns {Promise<{success: boolean, modelName: string, errorMessage: string, usageInfo: object}|null>}
+     */
+    async _checkProviderHealthByUsage(providerType, serviceAdapter, providerConfig) {
+        // 检查适配器是否支持 getUsageLimits 方法
+        if (typeof serviceAdapter.getUsageLimits !== 'function') {
+            return null;
+        }
+
+        try {
+            this._log('debug', `Performing usage-based health check for ${providerConfig.uuid} (${providerType})`);
+            const rawUsageData = await serviceAdapter.getUsageLimits();
+            
+            // 只支持 Kiro
+            if (providerType !== MODEL_PROVIDER.KIRO_API) {
+                return null;
+            }
+            
+            // 动态导入格式化函数，避免循环依赖
+            const { formatKiroUsage } = await import('./usage-service.js');
+            const formattedUsage = formatKiroUsage(rawUsageData);
+
+            if (!formattedUsage) {
+                return { 
+                    success: false, 
+                    modelName: null, 
+                    errorMessage: 'Failed to parse usage data',
+                    usageInfo: null
+                };
+            }
+
+            // 分析用量数据，判断是否健康
+            const healthAnalysis = this._analyzeUsageHealth(providerType, formattedUsage, providerConfig);
+            
+            // 更新 provider 的用量信息
+            const provider = this._findProvider(providerType, providerConfig.uuid);
+            if (provider) {
+                provider.config.usageInfo = healthAnalysis.usageInfo;
+                provider.config.lastHealthCheckTime = new Date().toISOString();
+            }
+
+            this._log('info', `Usage-based health check for ${providerConfig.uuid} (${providerType}): ${healthAnalysis.success ? 'Healthy' : 'Unhealthy'} - ${healthAnalysis.summary}`);
+            
+            return {
+                success: healthAnalysis.success,
+                modelName: null,
+                errorMessage: healthAnalysis.success ? null : healthAnalysis.errorMessage,
+                usageInfo: healthAnalysis.usageInfo
+            };
+        } catch (error) {
+            this._log('warn', `Usage-based health check failed for ${providerConfig.uuid} (${providerType}): ${error.message}`);
+            // 返回 null 表示用量查询失败，让调用者回退到传统方式
+            return null;
+        }
+    }
+
+    /**
+     * 分析用量数据，判断账号健康状态
+     * @private
+     * @param {string} providerType - 提供商类型
+     * @param {object} formattedUsage - 格式化后的用量数据
+     * @param {object} providerConfig - 提供商配置
+     * @returns {{success: boolean, errorMessage: string, usageInfo: object, summary: string}}
+     */
+    _analyzeUsageHealth(providerType, formattedUsage, providerConfig) {
+        const usageBreakdown = formattedUsage.usageBreakdown || [];
+        
+        // 计算总用量
+        let totalUsed = 0;
+        let totalLimit = 0;
+        let hasActiveQuota = false;
+        
+        for (const breakdown of usageBreakdown) {
+            const used = breakdown.currentUsage || 0;
+            const limit = breakdown.usageLimit || 0;
+            
+            totalUsed += used;
+            totalLimit += limit;
+            
+            // 检查是否有可用配额
+            if (limit > 0 && used < limit) {
+                hasActiveQuota = true;
+            }
+            
+            // 检查免费试用配额
+            if (breakdown.freeTrial && breakdown.freeTrial.status === 'ACTIVE') {
+                const freeUsed = breakdown.freeTrial.currentUsage || 0;
+                const freeLimit = breakdown.freeTrial.usageLimit || 0;
+                totalUsed += freeUsed;
+                totalLimit += freeLimit;
+                if (freeLimit > 0 && freeUsed < freeLimit) {
+                    hasActiveQuota = true;
+                }
+            }
+            
+            // 检查奖励配额
+            if (breakdown.bonuses && Array.isArray(breakdown.bonuses)) {
+                for (const bonus of breakdown.bonuses) {
+                    if (bonus.status === 'ACTIVE') {
+                        const bonusUsed = bonus.currentUsage || 0;
+                        const bonusLimit = bonus.usageLimit || 0;
+                        totalUsed += bonusUsed;
+                        totalLimit += bonusLimit;
+                        if (bonusLimit > 0 && bonusUsed < bonusLimit) {
+                            hasActiveQuota = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        const remaining = totalLimit - totalUsed;
+        const usagePercent = totalLimit > 0 ? Math.round((totalUsed / totalLimit) * 100) : 0;
+        
+        // 构建用量信息
+        const usageInfo = {
+            used: totalUsed,
+            limit: totalLimit,
+            remaining: remaining,
+            usagePercent: usagePercent,
+            nextReset: formattedUsage.nextDateReset,
+            daysUntilReset: formattedUsage.daysUntilReset,
+            subscription: formattedUsage.subscription?.title || formattedUsage.subscription?.type,
+            email: formattedUsage.user?.email
+        };
+
+        // 判断健康状态
+        // 配额用完或没有可用配额时标记为不健康
+        const isHealthy = hasActiveQuota && remaining > 0;
+        
+        let errorMessage = null;
+        let summary = '';
+        
+        if (!isHealthy) {
+            if (remaining <= 0) {
+                errorMessage = `配额已用完 (${totalUsed}/${totalLimit})`;
+                summary = errorMessage;
+            } else if (!hasActiveQuota) {
+                errorMessage = '没有可用的活跃配额';
+                summary = errorMessage;
+            }
+        } else {
+            summary = `${totalUsed}/${totalLimit} (${usagePercent}% 已用, 剩余 ${remaining})`;
+        }
+
+        return {
+            success: isHealthy,
+            errorMessage,
+            usageInfo,
+            summary
+        };
+    }
+
+    /**
+     * 异步尝试恢复不健康的 provider
+     * 执行健康检查，如果成功则标记为健康
+     * @private
+     */
+    async _tryRecoverProvider(providerType, providerConfig) {
+        try {
+            const healthResult = await this._checkProviderHealth(providerType, providerConfig, true);
+            
+            if (healthResult === null) {
+                this._log('debug', `Recovery check skipped for ${providerConfig.uuid} (${providerType}): Check not implemented`);
+                return;
+            }
+            
+            if (healthResult.success) {
+                this.markProviderHealthy(providerType, providerConfig, false, healthResult.modelName);
+                this._log('info', `Provider ${providerConfig.uuid} (${providerType}) recovered successfully`);
+            } else {
+                this._log('warn', `Provider ${providerConfig.uuid} (${providerType}) recovery failed: ${healthResult.errorMessage}`);
+                // 更新错误信息但不增加错误计数（因为已经是不健康状态）
+                const provider = this._findProvider(providerType, providerConfig.uuid);
+                if (provider) {
+                    provider.config.lastErrorMessage = healthResult.errorMessage;
+                    provider.config.lastHealthCheckTime = new Date().toISOString();
+                    if (healthResult.modelName) {
+                        provider.config.lastHealthCheckModel = healthResult.modelName;
+                    }
+                    this._debouncedSave(providerType);
+                }
+            }
+        } catch (error) {
+            this._log('error', `Recovery check error for ${providerConfig.uuid} (${providerType}): ${error.message}`);
+        }
     }
 
     /**

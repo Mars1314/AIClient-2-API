@@ -616,7 +616,7 @@ async initializeAuth(forceRefresh = false) {
         let systemPrompt = this.getContentText(inSystemPrompt);
         const processedMessages = messages;
 
-        if (processedMessages.length === 0) {
+        if (!processedMessages || processedMessages.length === 0) {
             throw new Error('No user messages found');
         }
 
@@ -1134,7 +1134,21 @@ async initializeAuth(forceRefresh = false) {
         const maxRetries = this.config.REQUEST_MAX_RETRIES || 3;
         const baseDelay = this.config.REQUEST_BASE_DELAY || 1000; // 1 second base delay
 
-        const requestData = this.buildCodewhispererRequest(body.messages, model, body.tools, body.system);
+        // 处理 contents 格式的请求，转换为 messages 格式
+        let messages = body.messages;
+        if (!messages && body.contents) {
+            // 将 Gemini 风格的 contents 格式转换为 OpenAI 风格的 messages 格式
+            messages = body.contents.map(content => ({
+                role: content.role,
+                content: content.parts?.map(part => part.text).join('') || ''
+            }));
+        }
+        
+        if (!messages || messages.length === 0) {
+            throw new Error('No messages found in request body');
+        }
+
+        const requestData = this.buildCodewhispererRequest(messages, model, body.tools, body.system);
 
         try {
             const token = this.accessToken; // Use the already initialized token
