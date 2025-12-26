@@ -1,5 +1,5 @@
 import * as fs from 'fs'; // Import fs module
-import { getServiceAdapter, serviceInstances } from './adapter.js';
+import { getServiceAdapter, serviceInstances, clearServiceInstance } from './adapter.js';
 import { MODEL_PROVIDER } from './common.js';
 import axios from 'axios';
 
@@ -485,6 +485,8 @@ export class ProviderPoolManager {
             }
         });
 
+        // 健康检查时清除缓存，确保使用最新的凭据
+        clearServiceInstance(providerType, providerConfig.uuid);
         const serviceAdapter = getServiceAdapter(tempConfig);
 
         // 优先使用基于用量查询的健康检测（不消耗配额）

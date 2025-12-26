@@ -68,6 +68,10 @@ import {
     refreshUsage
 } from './usage-manager.js';
 
+import {
+    initKiroImport
+} from './kiro-import.js';
+
 /**
  * 加载初始数据
  */
@@ -102,6 +106,7 @@ function initApp() {
     initRoutingExamples(); // 初始化路径路由示例功能
     initUploadConfigManager(); // 初始化上传配置管理功能
     initUsageManager(); // 初始化用量管理功能
+    initKiroImport(); // 初始化 Kiro Token 批量导入功能
     loadInitialData();
     
     // 显示欢迎消息

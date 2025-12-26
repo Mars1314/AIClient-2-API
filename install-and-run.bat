@@ -2,8 +2,32 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
+:: 默认端口
+set SERVER_PORT=3000
+set HOST=localhost
+
+:: 从config.json读取端口配置
+if exist "config.json" (
+    for /f "tokens=2 delims=:," %%a in ('findstr /i "SERVER_PORT" config.json') do (
+        set "PORT_TMP=%%a"
+        set "PORT_TMP=!PORT_TMP: =!"
+        if defined PORT_TMP set SERVER_PORT=!PORT_TMP!
+    )
+    for /f "tokens=2 delims=:," %%a in ('findstr /i "\"HOST\"" config.json') do (
+        set "HOST_TMP=%%a"
+        set "HOST_TMP=!HOST_TMP: =!"
+        set "HOST_TMP=!HOST_TMP:"=!"
+        if defined HOST_TMP if not "!HOST_TMP!"=="null" set HOST=!HOST_TMP!
+    )
+)
+
+:: 设置窗口标题（包含端口）
+title AI Client 2 API Server [Port: !SERVER_PORT!] - 请勿关闭！
+
 echo ========================================
 echo   AI Client 2 API 快速安装启动脚本
+echo   端口: !SERVER_PORT!
+echo   ⚠️  请勿关闭此窗口，关闭后服务将停止！
 echo ========================================
 echo.
 
@@ -82,9 +106,14 @@ echo ========================================
 echo   启动AI Client 2 API服务器...
 echo ========================================
 echo.
-echo 🌐 服务器将在 http://localhost:3000 启动
-echo 📖 访问 http://localhost:3000 查看管理界面
-echo ⏹️  按 Ctrl+C 停止服务器
+echo 🌐 服务器将在 http://!HOST!:!SERVER_PORT! 启动
+echo 📖 访问 http://!HOST!:!SERVER_PORT! 查看管理界面
+echo.
+echo ╔══════════════════════════════════════╗
+echo ║  ⚠️  警告：请勿关闭此窗口！          ║
+echo ║  关闭窗口将导致API服务停止运行       ║
+echo ║  按 Ctrl+C 可安全停止服务器          ║
+echo ╚══════════════════════════════════════╝
 echo.
 
 :: 启动服务器

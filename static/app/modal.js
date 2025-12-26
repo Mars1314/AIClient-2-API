@@ -377,11 +377,40 @@ function renderProviderList(providers) {
             `;
         }
         
+        // 构建额度信息显示
+        let usageInfoHtml = '';
+        if (provider.usageInfo) {
+            const { used, limit, remaining, usagePercent } = provider.usageInfo;
+            const usageBarClass = usagePercent > 90 ? 'critical' : usagePercent > 70 ? 'warning' : 'normal';
+            usageInfoHtml = `
+                <div class="provider-usage-info">
+                    <i class="fas fa-chart-pie"></i>
+                    <span class="usage-label">额度:</span>
+                    <span class="usage-value">${used || 0}/${limit || 0}</span>
+                    <span class="usage-remaining">(剩余: ${remaining || 0})</span>
+                    <div class="usage-bar-mini ${usageBarClass}" style="width: 60px; height: 6px; background: #e9ecef; border-radius: 3px; display: inline-block; margin-left: 8px; vertical-align: middle;">
+                        <div style="width: ${usagePercent || 0}%; height: 100%; background: ${usagePercent > 90 ? '#dc3545' : usagePercent > 70 ? '#ffc107' : '#28a745'}; border-radius: 3px;"></div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // 构建备注信息显示
+        let commentHtml = '';
+        if (provider._comment) {
+            commentHtml = `
+                <div class="provider-comment">
+                    <i class="fas fa-tag"></i>
+                    <span class="comment-text">${provider._comment}</span>
+                </div>
+            `;
+        }
+        
         return `
             <div class="provider-item-detail ${healthClass} ${disabledClass}" data-uuid="${provider.uuid}">
                 <div class="provider-item-header" onclick="window.toggleProviderDetails('${provider.uuid}')">
                     <div class="provider-info">
-                        <div class="provider-name">${provider.uuid}</div>
+                        <div class="provider-name">${provider._comment || provider.uuid}</div>
                         <div class="provider-meta">
                             <span class="health-status">
                                 <i class="${healthIcon}"></i>
@@ -395,6 +424,7 @@ function renderProviderList(providers) {
                             失败次数: ${provider.errorCount || 0} |
                             最后使用: ${lastUsed}
                         </div>
+                        ${usageInfoHtml}
                         <div class="provider-health-meta">
                             <span class="health-check-time">
                                 <i class="fas fa-clock"></i>
@@ -408,6 +438,9 @@ function renderProviderList(providers) {
                         ${errorInfoHtml}
                     </div>
                     <div class="provider-actions-group">
+                        <button class="btn-small btn-check" onclick="window.checkSingleProvider('${provider.uuid}', event)" title="检测此配置">
+                            <i class="fas fa-heartbeat"></i> 检测
+                        </button>
                         <button class="btn-small ${toggleButtonClass}" onclick="window.toggleProviderStatus('${provider.uuid}', event)" title="${toggleButtonText}此提供商">
                             <i class="${toggleButtonIcon}"></i> ${toggleButtonText}
                         </button>
@@ -846,7 +879,7 @@ async function saveProvider(uuid, event) {
 async function deleteProvider(uuid, event) {
     event.stopPropagation();
     
-    if (!confirm('确定要删除这个提供商配置吗？此操作不可恢复。')) {
+    if (!confirm('确定要删除这个提供商配置吗？\n\n⚠️ 此操作将同时删除关联的凭据文件，不可恢复！')) {
         return;
     }
     
@@ -854,9 +887,15 @@ async function deleteProvider(uuid, event) {
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
     
     try {
-        await window.apiClient.delete(`/providers/${encodeURIComponent(providerType)}/${uuid}`);
+        const result = await window.apiClient.delete(`/providers/${encodeURIComponent(providerType)}/${uuid}`);
         await window.apiClient.post('/reload-config');
-        showToast('提供商配置删除成功', 'success');
+        
+        let message = '提供商配置删除成功';
+        if (result.deletedCredFile) {
+            message += `，凭据文件 ${result.deletedCredFile} 已删除`;
+        }
+        showToast(message, 'success');
+        
         // 重新获取最新配置
         await refreshProviderConfig(providerType);
     } catch (error) {
@@ -1311,6 +1350,54 @@ async function performHealthCheck(providerType) {
 }
 
 /**
+ * 检测单个提供商配置
+ * @param {string} uuid - 提供商UUID
+ * @param {Event} event - 事件对象
+ */
+async function checkSingleProvider(uuid, event) {
+    event.stopPropagation();
+    
+    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
+    const btn = event.target.closest('button');
+    const originalHtml = btn.innerHTML;
+    
+    try {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        showToast('正在检测...', 'info');
+        
+        const response = await window.apiClient.post(
+            `/providers/${encodeURIComponent(providerType)}/${uuid}/health-check`,
+            {}
+        );
+        
+        if (response.success) {
+            const result = response.result;
+            if (result.success) {
+                showToast('检测通过，配置健康', 'success');
+            } else {
+                showToast(`检测失败: ${result.errorMessage || '未知错误'}`, 'error');
+            }
+            
+            // 重新加载配置
+            await window.apiClient.post('/reload-config');
+            
+            // 刷新提供商配置显示
+            await refreshProviderConfig(providerType);
+        } else {
+            showToast('检测失败: ' + (response.error || '未知错误'), 'error');
+        }
+    } catch (error) {
+        console.error('检测失败:', error);
+        showToast(`检测失败: ${error.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+    }
+}
+
+/**
  * 渲染不支持的模型选择器（不调用API，直接使用传入的模型列表）
  * @param {string} uuid - 提供商UUID
  * @param {Array} models - 模型列表
@@ -1361,6 +1448,7 @@ export {
     toggleProviderStatus,
     resetAllProvidersHealth,
     performHealthCheck,
+    checkSingleProvider,
     loadModelsForProviderType,
     renderNotSupportedModelsSelector,
     goToProviderPage
@@ -1378,4 +1466,5 @@ window.addProvider = addProvider;
 window.toggleProviderStatus = toggleProviderStatus;
 window.resetAllProvidersHealth = resetAllProvidersHealth;
 window.performHealthCheck = performHealthCheck;
+window.checkSingleProvider = checkSingleProvider;
 window.goToProviderPage = goToProviderPage;

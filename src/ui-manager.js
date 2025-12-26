@@ -1018,6 +1018,32 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
             }
 
             const deletedProvider = providers[providerIndex];
+            
+            // 同时删除关联的凭据文件
+            let deletedCredFile = null;
+            const credPathKeys = [
+                'KIRO_OAUTH_CREDS_FILE_PATH',
+                'GEMINI_OAUTH_CREDS_FILE_PATH',
+                'QWEN_OAUTH_CREDS_FILE_PATH',
+                'ANTIGRAVITY_OAUTH_CREDS_FILE_PATH'
+            ];
+            
+            for (const key of credPathKeys) {
+                if (deletedProvider[key]) {
+                    const credFilePath = path.join(process.cwd(), deletedProvider[key]);
+                    try {
+                        if (existsSync(credFilePath)) {
+                            await fs.unlink(credFilePath);
+                            deletedCredFile = deletedProvider[key];
+                            console.log(`[UI API] Deleted credential file: ${credFilePath}`);
+                        }
+                    } catch (unlinkError) {
+                        console.warn(`[UI API] Failed to delete credential file ${credFilePath}:`, unlinkError.message);
+                    }
+                    break;
+                }
+            }
+            
             providers.splice(providerIndex, 1);
 
             // Remove the entire provider type if no providers left
@@ -1041,6 +1067,7 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                 filePath: filePath,
                 providerType,
                 providerConfig: deletedProvider,
+                deletedCredFile,
                 timestamp: new Date().toISOString()
             });
 
@@ -1048,7 +1075,8 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
             res.end(JSON.stringify({
                 success: true,
                 message: 'Provider deleted successfully',
-                deletedProvider
+                deletedProvider,
+                deletedCredFile
             }));
             return true;
         } catch (error) {
@@ -1314,6 +1342,95 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
             return true;
         } catch (error) {
             console.error('[UI API] Health check error:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: error.message } }));
+            return true;
+        }
+    }
+
+    // Perform health check for a single provider
+    const singleHealthCheckMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)\/health-check$/);
+    if (method === 'POST' && singleHealthCheckMatch) {
+        const providerType = decodeURIComponent(singleHealthCheckMatch[1]);
+        const providerUuid = singleHealthCheckMatch[2];
+
+        try {
+            if (!providerPoolManager) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: 'Provider pool manager not initialized' } }));
+                return true;
+            }
+
+            const providers = providerPoolManager.providerStatus[providerType] || [];
+            const providerStatus = providers.find(p => p.config.uuid === providerUuid);
+            
+            if (!providerStatus) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: 'Provider not found' } }));
+                return true;
+            }
+
+            const providerConfig = providerStatus.config;
+            console.log(`[UI API] Starting single health check for ${providerUuid} in ${providerType}`);
+
+            let result;
+            try {
+                const healthResult = await providerPoolManager._checkProviderHealth(providerType, providerConfig, true);
+                
+                if (healthResult === null) {
+                    result = {
+                        uuid: providerConfig.uuid,
+                        success: null,
+                        errorMessage: '健康检测不支持此提供商类型'
+                    };
+                } else if (healthResult.success) {
+                    providerPoolManager.markProviderHealthy(providerType, providerConfig, false, healthResult.modelName);
+                    result = {
+                        uuid: providerConfig.uuid,
+                        success: true,
+                        modelName: healthResult.modelName,
+                        usageInfo: healthResult.usageInfo
+                    };
+                } else {
+                    providerPoolManager.markProviderUnhealthy(providerType, providerConfig, healthResult.errorMessage);
+                    providerStatus.config.lastHealthCheckTime = new Date().toISOString();
+                    if (healthResult.modelName) {
+                        providerStatus.config.lastHealthCheckModel = healthResult.modelName;
+                    }
+                    result = {
+                        uuid: providerConfig.uuid,
+                        success: false,
+                        modelName: healthResult.modelName,
+                        errorMessage: healthResult.errorMessage || '检测失败'
+                    };
+                }
+            } catch (error) {
+                providerPoolManager.markProviderUnhealthy(providerType, providerConfig, error.message);
+                result = {
+                    uuid: providerConfig.uuid,
+                    success: false,
+                    errorMessage: error.message
+                };
+            }
+
+            // 保存更新后的状态到文件
+            const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'provider_pools.json';
+            const providerPools = {};
+            for (const pType in providerPoolManager.providerStatus) {
+                providerPools[pType] = providerPoolManager.providerStatus[pType].map(ps => ps.config);
+            }
+            writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf8');
+
+            console.log(`[UI API] Single health check completed for ${providerUuid}: ${result.success ? 'healthy' : 'unhealthy'}`);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                result
+            }));
+            return true;
+        } catch (error) {
+            console.error('[UI API] Single health check error:', error);
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: { message: error.message } }));
             return true;
@@ -1773,6 +1890,169 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                 error: {
                     message: '重新加载配置文件失败: ' + error.message
                 }
+            }));
+            return true;
+        }
+    }
+
+    // Kiro Token 批量导入 API
+    if (method === 'POST' && pathParam === '/api/import-kiro-tokens') {
+        try {
+            const body = await getRequestBody(req);
+            const { tokens } = body;
+
+            if (!tokens || !Array.isArray(tokens)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    error: { message: '无效的数据格式，需要 tokens 数组' }
+                }));
+                return true;
+            }
+
+            const outputDir = path.join(process.cwd(), 'configs', 'kiro');
+            await fs.mkdir(outputDir, { recursive: true });
+
+            // 先收集已存在的 refreshToken
+            const existingRefreshTokens = new Set();
+            
+            // 从现有的 provider_pools.json 中读取已存在的配置
+            const poolsFilePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'provider_pools.json';
+            let existingPools = {};
+            
+            if (existsSync(poolsFilePath)) {
+                try {
+                    existingPools = JSON.parse(readFileSync(poolsFilePath, 'utf8'));
+                    const existingKiroPools = existingPools['claude-kiro-oauth'] || [];
+                    
+                    // 读取每个已存在配置的凭据文件，提取 refreshToken
+                    for (const pool of existingKiroPools) {
+                        if (pool.KIRO_OAUTH_CREDS_FILE_PATH) {
+                            const credPath = path.join(process.cwd(), pool.KIRO_OAUTH_CREDS_FILE_PATH);
+                            try {
+                                if (existsSync(credPath)) {
+                                    const credContent = JSON.parse(readFileSync(credPath, 'utf8'));
+                                    if (credContent.refreshToken) {
+                                        existingRefreshTokens.add(credContent.refreshToken);
+                                    }
+                                }
+                            } catch (e) {
+                                // 忽略读取失败的文件
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[UI API] Failed to parse existing provider_pools.json:', e.message);
+                }
+            }
+
+            const poolEntries = [];
+            const createdFiles = [];
+            const errors = [];
+            const skipped = [];
+            let actualIndex = 0;
+
+            // 生成日期前缀 (YYYY-MM-DD)
+            const today = new Date();
+            const datePrefix = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+            for (let i = 0; i < tokens.length; i++) {
+                const token = tokens[i];
+
+                if (!token.refreshToken) {
+                    errors.push(`第 ${i + 1} 个 token 缺少 refreshToken`);
+                    continue;
+                }
+
+                // 检查 refreshToken 是否已存在
+                if (existingRefreshTokens.has(token.refreshToken)) {
+                    skipped.push(`第 ${i + 1} 个 token (${token.email || 'unknown'}) 已存在，跳过`);
+                    continue;
+                }
+
+                // 标记为已处理，避免本次导入中的重复
+                existingRefreshTokens.add(token.refreshToken);
+                actualIndex++;
+
+                // 生成序号 (01, 02, 03...)
+                const seqNum = String(actualIndex).padStart(2, '0');
+                const serialNumber = `${datePrefix}-${seqNum}`;
+                
+                // 生成文件名：日期-序号.json
+                const filename = `kiro-${serialNumber}.json`;
+                const credFilePath = path.join(outputDir, filename);
+
+                const email = token.email || `unknown-${i + 1}`;
+
+                // 凭据文件内容
+                const credFileContent = {
+                    _comment: `#${serialNumber} | Email: ${email} | Provider: ${token.provider || 'unknown'}`,
+                    _serialNumber: serialNumber,
+                    _originalId: token.id,
+                    _importedAt: new Date().toISOString(),
+                    refreshToken: token.refreshToken,
+                    accessToken: token.accessToken || null,
+                    authMethod: token.authMethod || 'social',
+                    region: 'us-east-1',
+                    profileArn: token.profileArn || null,
+                    expiresAt: token.expiresAt || null
+                };
+
+                await fs.writeFile(credFilePath, JSON.stringify(credFileContent, null, 2), 'utf8');
+                createdFiles.push(path.relative(process.cwd(), credFilePath));
+
+                // Pool 条目
+                poolEntries.push({
+                    KIRO_OAUTH_CREDS_FILE_PATH: path.relative(process.cwd(), credFilePath).replace(/\\/g, '/'),
+                    uuid: token.id || `kiro-${Date.now()}-${i}`,
+                    _comment: `#${serialNumber} | ${email}`,
+                    checkModelName: 'claude-haiku-4-5',
+                    checkHealth: true,
+                    isHealthy: true,
+                    isDisabled: false,
+                    lastUsed: null,
+                    usageCount: 0,
+                    errorCount: 0,
+                    lastErrorTime: null,
+                    lastHealthCheckTime: null,
+                    lastHealthCheckModel: null,
+                    lastErrorMessage: null
+                });
+            }
+
+            // 合并新的 kiro 配置（去重）
+            const existingKiroPools = existingPools['claude-kiro-oauth'] || [];
+            const existingUuids = new Set(existingKiroPools.map(p => p.uuid));
+            
+            for (const entry of poolEntries) {
+                if (!existingUuids.has(entry.uuid)) {
+                    existingKiroPools.push(entry);
+                    existingUuids.add(entry.uuid);
+                }
+            }
+
+            existingPools['claude-kiro-oauth'] = existingKiroPools;
+            writeFileSync(poolsFilePath, JSON.stringify(existingPools, null, 2), 'utf8');
+
+            // 重新加载配置
+            await reloadConfig(providerPoolManager);
+
+            console.log(`[UI API] Imported ${createdFiles.length} Kiro tokens`);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                message: `成功导入 ${createdFiles.length} 个 Kiro token` + (skipped.length > 0 ? `，跳过 ${skipped.length} 个重复` : ''),
+                createdFiles,
+                totalPoolEntries: existingKiroPools.length,
+                skipped: skipped.length > 0 ? skipped : undefined,
+                errors: errors.length > 0 ? errors : undefined
+            }));
+            return true;
+        } catch (error) {
+            console.error('[UI API] Failed to import Kiro tokens:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                error: { message: '导入失败: ' + error.message }
             }));
             return true;
         }

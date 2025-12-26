@@ -158,22 +158,20 @@ async function startServer() {
         console.log(`  • Health check: /health`);
         console.log(`  • UI Management Console: http://${CONFIG.HOST}:${CONFIG.SERVER_PORT}/`);
 
-        // Auto-open browser to UI (only if host is localhost or 127.0.0.1)
-        // if (CONFIG.HOST === 'localhost' || CONFIG.HOST === '127.0.0.1') {
-            try {
-                const open = (await import('open')).default;
-                setTimeout(() => {
-                    open(`http://${CONFIG.HOST}:${CONFIG.SERVER_PORT}/login.html`)
-                        .then(() => {
-                            console.log('[UI] Opened login page in default browser');
-                        })
-                        .catch(err => {
-                            console.log('[UI] Please open manually: http://' + CONFIG.HOST + ':' + CONFIG.SERVER_PORT + '/login.html');
-                        });
-                }, 1000);
-            } catch (err) {
-                console.log(`[UI] Login page available at: http://${CONFIG.HOST}:${CONFIG.SERVER_PORT}/login.html`);
-            }
+        // Auto-open browser disabled - 如需启用，取消下面的注释
+        // try {
+        //     const open = (await import('open')).default;
+        //     setTimeout(() => {
+        //         open(`http://${CONFIG.HOST}:${CONFIG.SERVER_PORT}/login.html`)
+        //             .then(() => {
+        //                 console.log('[UI] Opened login page in default browser');
+        //             })
+        //             .catch(err => {
+        //                 console.log('[UI] Please open manually: http://' + CONFIG.HOST + ':' + CONFIG.SERVER_PORT + '/login.html');
+        //             });
+        //     }, 1000);
+        // } catch (err) {
+        //     console.log(`[UI] Login page available at: http://${CONFIG.HOST}:${CONFIG.SERVER_PORT}/login.html`);
         // }
 
         if (CONFIG.CRON_REFRESH_TOKEN) {

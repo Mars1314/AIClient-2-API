@@ -1471,6 +1471,17 @@ input:checked + .toggle-slider:before {
     transition: all 0.3s ease;
 }
 
+.btn-check {
+    background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);
+    color: white;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.btn-check:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
 .btn-edit {
     background: linear-gradient(135deg, #059669 0%, #10b981 100%);
     color: white;

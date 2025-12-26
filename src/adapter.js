@@ -351,6 +351,39 @@ export class QwenApiServiceAdapter extends ApiServiceAdapter {
 // 用于存储服务适配器单例的映射
 export const serviceInstances = {};
 
+/**
+ * 清除指定 provider 的缓存实例
+ * @param {string} providerType - 提供商类型
+ * @param {string} uuid - 提供商 UUID（可选，不传则清除该类型所有实例）
+ */
+export function clearServiceInstance(providerType, uuid = null) {
+    if (uuid) {
+        const providerKey = providerType + uuid;
+        if (serviceInstances[providerKey]) {
+            delete serviceInstances[providerKey];
+            console.log(`[Adapter] Cleared cached instance for ${providerKey}`);
+        }
+    } else {
+        // 清除该类型的所有实例
+        const keysToDelete = Object.keys(serviceInstances).filter(key => key.startsWith(providerType));
+        keysToDelete.forEach(key => {
+            delete serviceInstances[key];
+            console.log(`[Adapter] Cleared cached instance for ${key}`);
+        });
+    }
+}
+
+/**
+ * 清除所有缓存的服务实例
+ */
+export function clearAllServiceInstances() {
+    const count = Object.keys(serviceInstances).length;
+    for (const key in serviceInstances) {
+        delete serviceInstances[key];
+    }
+    console.log(`[Adapter] Cleared all ${count} cached service instances`);
+}
+
 // 服务适配器工厂
 export function getServiceAdapter(config) {
     console.log(`[Adapter] getServiceAdapter, provider: ${config.MODEL_PROVIDER}, uuid: ${config.uuid}`);
