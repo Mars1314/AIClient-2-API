@@ -13,18 +13,21 @@ import { json } from 'stream/consumers';
 const KIRO_CONSTANTS = {
     REFRESH_URL: 'https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken',
     REFRESH_IDC_URL: 'https://oidc.{{region}}.amazonaws.com/token',
-    BASE_URL: 'https://codewhisperer.{{region}}.amazonaws.com/generateAssistantResponse',
-    AMAZON_Q_URL: 'https://codewhisperer.{{region}}.amazonaws.com/SendMessageStreaming',
+    // 使用 q.{region}.amazonaws.com 而不是 codewhisperer
+    BASE_URL: 'https://q.{{region}}.amazonaws.com/generateAssistantResponse',
+    AMAZON_Q_URL: 'https://q.{{region}}.amazonaws.com/SendMessageStreaming',
     USAGE_LIMITS_URL: 'https://q.{{region}}.amazonaws.com/getUsageLimits',
     DEFAULT_MODEL_NAME: 'claude-opus-4-5',
     AXIOS_TIMEOUT: 120000, // 2 minutes timeout
     USER_AGENT: 'KiroIDE',
-    KIRO_VERSION: '0.7.5',
+    KIRO_VERSION: '0.8.0',
     CONTENT_TYPE_JSON: 'application/json',
     ACCEPT_JSON: 'application/json',
     AUTH_METHOD_SOCIAL: 'social',
     CHAT_TRIGGER_TYPE_MANUAL: 'MANUAL',
     ORIGIN_AI_EDITOR: 'AI_EDITOR',
+    // IDC 刷新专用的 x-amz-user-agent
+    IDC_AMZ_USER_AGENT: 'aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE',
 };
 
 // 从 provider-models.js 获取支持的模型列表
@@ -53,28 +56,46 @@ const KIRO_AUTH_TOKEN_FILE = "kiro-auth-token.json";
  * Provides OpenAI-compatible API for Claude Sonnet 4 via Kiro/CodeWhisperer
  */
 
-async function getMacAddressSha256() {
-    const networkInterfaces = os.networkInterfaces();
-    let macAddress = '';
-
-    for (const interfaceName in networkInterfaces) {
-        const networkInterface = networkInterfaces[interfaceName];
-        for (const iface of networkInterface) {
-            if (!iface.internal && iface.mac && iface.mac !== '00:00:00:00:00:00') {
-                macAddress = iface.mac;
-                break;
-            }
-        }
-        if (macAddress) break;
+/**
+ * 根据凭证信息生成唯一的 Machine ID
+ * 优先使用 profileArn，其次使用 refreshToken
+ * 这样每个账号有独立的 machine_id，避免多账号共享同一设备指纹被检测
+ * @param {string} profileArn - Profile ARN
+ * @param {string} refreshToken - Refresh Token
+ * @param {string} customMachineId - 自定义 machine_id（可选）
+ * @returns {string} 64位十六进制的 machine_id
+ */
+function generateMachineId(profileArn, refreshToken, customMachineId = null) {
+    // 如果配置了自定义 machineId 且长度为 64，优先使用
+    if (customMachineId && customMachineId.length === 64) {
+        return customMachineId;
     }
 
-    if (!macAddress) {
-        console.warn("无法获取MAC地址，将使用默认值。");
-        macAddress = '00:00:00:00:00:00'; // Fallback if no MAC address is found
+    // 如果有有效的 profileArn 则使用 profileArn 生成固定指纹
+    if (profileArn && isValidProfileArn(profileArn)) {
+        return crypto.createHash('sha256').update(`KotlinNativeAPI/${profileArn}`).digest('hex');
     }
 
-    const sha256Hash = crypto.createHash('sha256').update(macAddress).digest('hex');
-    return sha256Hash;
+    // 使用 refreshToken 生成
+    if (refreshToken && refreshToken.length > 0) {
+        return crypto.createHash('sha256').update(`KotlinNativeAPI/${refreshToken}`).digest('hex');
+    }
+
+    // 没有有效的凭证，返回随机值（不推荐）
+    console.warn('[Kiro] 无法生成稳定的 machineId，将使用随机值');
+    return crypto.createHash('sha256').update(`KotlinNativeAPI/${uuidv4()}`).digest('hex');
+}
+
+/**
+ * 验证 profileArn 是否有效
+ * @param {string} profileArn
+ * @returns {boolean}
+ */
+function isValidProfileArn(profileArn) {
+    return profileArn &&
+           profileArn.length > 0 &&
+           profileArn.startsWith('arn:aws') &&
+           profileArn.includes('profile/');
 }
 
 // Helper functions for tool calls and JSON parsing
@@ -305,14 +326,24 @@ export class KiroApiService {
         if (this.isInitialized) return;
         console.log('[Kiro] Initializing Kiro API Service...');
         await this.initializeAuth();
-        const macSha256 = await getMacAddressSha256();
+
+        // 使用 profileArn 或 refreshToken 生成 machineId，而不是 MAC 地址
+        // 这样每个账号有独立的设备指纹，避免多账号共享同一指纹被检测
+        this.machineId = generateMachineId(this.profileArn, this.refreshToken, this.config.KIRO_MACHINE_ID);
+        console.log(`[Kiro] Generated machineId: ${this.machineId.substring(0, 16)}...`);
+
         const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
+        // 随机选择系统版本
+        const systemVersions = ['darwin#24.6.0', 'win32#10.0.22631'];
+        const osName = systemVersions[Math.floor(Math.random() * systemVersions.length)];
+        const nodeVersion = '22.21.1';
+
         // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
         const httpAgent = new http.Agent({
             keepAlive: true,
-            maxSockets: 100,        // 每个主机最多 10 个连接
-            maxFreeSockets: 5,     // 最多保留 5 个空闲连接
-            timeout: 120000,        // 空闲连接 60 秒后关闭
+            maxSockets: 100,
+            maxFreeSockets: 5,
+            timeout: 120000,
         });
         const httpsAgent = new https.Agent({
             keepAlive: true,
@@ -320,7 +351,11 @@ export class KiroApiService {
             maxFreeSockets: 5,
             timeout: 120000,
         });
-        
+
+        // 构建与 kiro.rs 一致的 headers
+        const xAmzUserAgent = `aws-sdk-js/1.0.27 KiroIDE-${kiroVersion}-${this.machineId}`;
+        const userAgent = `aws-sdk-js/1.0.27 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererstreaming#1.0.27 m/E KiroIDE-${kiroVersion}-${this.machineId}`;
+
         const axiosConfig = {
             timeout: KIRO_CONSTANTS.AXIOS_TIMEOUT,
             httpAgent,
@@ -328,18 +363,20 @@ export class KiroApiService {
             headers: {
                 'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
                 'Accept': KIRO_CONSTANTS.ACCEPT_JSON,
-                'amz-sdk-request': 'attempt=1; max=1',
+                'amz-sdk-request': 'attempt=1; max=3',
                 'x-amzn-kiro-agent-mode': 'vibe',
-                'x-amz-user-agent': `aws-sdk-js/1.0.0 KiroIDE-${kiroVersion}-${macSha256}`,
-                'user-agent': `aws-sdk-js/1.0.0 ua/2.1 os/win32#10.0.26100 lang/js md/nodejs#22.21.1 api/codewhispererruntime#1.0.0 m/N,E KiroIDE-${kiroVersion}-${macSha256}`
+                'x-amzn-codewhisperer-optout': 'true',  // 添加这个重要的 header
+                'x-amz-user-agent': xAmzUserAgent,
+                'user-agent': userAgent,
+                'Connection': 'close',  // 与 kiro.rs 一致
             },
         };
-        
+
         // 根据 useSystemProxy 配置代理设置
         if (!this.useSystemProxy) {
             axiosConfig.proxy = false;
         }
-        
+
         this.axiosInstance = axios.create(axiosConfig);
         this.isInitialized = true;
     }
@@ -446,45 +483,130 @@ async initializeAuth(forceRefresh = false) {
             throw new Error('No refresh token available to refresh access token.');
         }
         try {
-            const requestBody = {
-                refreshToken: this.refreshToken,
-            };
+            let response;
 
-            let refreshUrl = this.refreshUrl;
             if (this.authMethod !== KIRO_CONSTANTS.AUTH_METHOD_SOCIAL) {
-                refreshUrl = this.refreshIDCUrl;
-                requestBody.clientId = this.clientId;
-                requestBody.clientSecret = this.clientSecret;
-                requestBody.grantType = 'refresh_token';
-            }
-            const response = await this.axiosInstance.post(refreshUrl, requestBody);
-            console.log('[Kiro Auth] Token refresh response: ok');
-
-            if (response.data && response.data.accessToken) {
-                this.accessToken = response.data.accessToken;
-                this.refreshToken = response.data.refreshToken;
-                this.profileArn = response.data.profileArn;
-                const expiresIn = response.data.expiresIn;
-                const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
-                this.expiresAt = expiresAt;
-                console.info('[Kiro Auth] Access token refreshed successfully');
-
-                // Update the token file - use specified path if configured, otherwise use default
-                const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
-                const updatedTokenData = {
-                    accessToken: this.accessToken,
+                // IDC 认证方式 - 使用专门的 headers
+                const refreshUrl = this.refreshIDCUrl;
+                const requestBody = {
+                    clientId: this.clientId,
+                    clientSecret: this.clientSecret,
                     refreshToken: this.refreshToken,
-                    expiresAt: expiresAt,
+                    grantType: 'refresh_token',
                 };
-                if(this.profileArn){
-                    updatedTokenData.profileArn = this.profileArn;
+
+                // 生成 machineId 用于 IDC 刷新
+                const machineId = generateMachineId(this.profileArn, this.refreshToken, this.config.KIRO_MACHINE_ID);
+                const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
+
+                // IDC 刷新专用的 headers，与 kiro.rs 保持一致
+                const idcHeaders = {
+                    'Content-Type': 'application/json',
+                    'Host': `oidc.${this.region}.amazonaws.com`,
+                    'Connection': 'keep-alive',
+                    'x-amz-user-agent': KIRO_CONSTANTS.IDC_AMZ_USER_AGENT,
+                    'Accept': '*/*',
+                    'Accept-Language': '*',
+                    'sec-fetch-mode': 'cors',
+                    'User-Agent': 'node',
+                    'Accept-Encoding': 'br, gzip, deflate',
+                };
+
+                response = await axios.post(refreshUrl, requestBody, {
+                    headers: idcHeaders,
+                    proxy: this.useSystemProxy ? undefined : false,
+                });
+
+                console.log('[Kiro Auth] IDC Token refresh response: ok');
+                console.log('[Kiro Auth] IDC Response keys:', Object.keys(response.data || {}));
+
+                // IDC 响应可能使用 snake_case (access_token) 或 camelCase (accessToken)
+                const accessToken = response.data.access_token || response.data.accessToken;
+                const refreshToken = response.data.refresh_token || response.data.refreshToken;
+                const expiresIn = response.data.expires_in || response.data.expiresIn || 3600;
+
+                if (response.data && accessToken) {
+                    this.accessToken = accessToken;
+                    if (refreshToken) {
+                        this.refreshToken = refreshToken;
+                    }
+                    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+                    this.expiresAt = expiresAt;
+                    console.info('[Kiro Auth] IDC Access token refreshed successfully');
+
+                    // Update the token file
+                    const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+                    const updatedTokenData = {
+                        accessToken: this.accessToken,
+                        refreshToken: this.refreshToken,
+                        expiresAt: expiresAt,
+                    };
+                    await saveCredentialsToFile(tokenFilePath, updatedTokenData);
+                } else {
+                    throw new Error('Invalid IDC refresh response: Missing access_token');
                 }
-                await saveCredentialsToFile(tokenFilePath, updatedTokenData);
             } else {
-                throw new Error('Invalid refresh response: Missing accessToken');
+                // Social 认证方式
+                const refreshUrl = this.refreshUrl;
+                const requestBody = {
+                    refreshToken: this.refreshToken,
+                };
+
+                // Social 刷新专用的 headers
+                const machineId = generateMachineId(this.profileArn, this.refreshToken, this.config.KIRO_MACHINE_ID);
+                const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
+                const refreshDomain = `prod.${this.region}.auth.desktop.kiro.dev`;
+
+                const socialHeaders = {
+                    'Accept': 'application/json, text/plain, */*',
+                    'Content-Type': 'application/json',
+                    'User-Agent': `KiroIDE-${kiroVersion}-${machineId}`,
+                    'Accept-Encoding': 'gzip, compress, deflate, br',
+                    'Host': refreshDomain,
+                    'Connection': 'close',
+                };
+
+                response = await axios.post(refreshUrl, requestBody, {
+                    headers: socialHeaders,
+                    proxy: this.useSystemProxy ? undefined : false,
+                });
+
+                console.log('[Kiro Auth] Social Token refresh response: ok');
+
+                if (response.data && response.data.accessToken) {
+                    this.accessToken = response.data.accessToken;
+                    if (response.data.refreshToken) {
+                        this.refreshToken = response.data.refreshToken;
+                    }
+                    if (response.data.profileArn) {
+                        this.profileArn = response.data.profileArn;
+                    }
+                    const expiresIn = response.data.expiresIn || 3600;
+                    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+                    this.expiresAt = expiresAt;
+                    console.info('[Kiro Auth] Social Access token refreshed successfully');
+
+                    // Update the token file
+                    const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+                    const updatedTokenData = {
+                        accessToken: this.accessToken,
+                        refreshToken: this.refreshToken,
+                        expiresAt: expiresAt,
+                    };
+                    if (this.profileArn) {
+                        updatedTokenData.profileArn = this.profileArn;
+                    }
+                    await saveCredentialsToFile(tokenFilePath, updatedTokenData);
+                } else {
+                    throw new Error('Invalid Social refresh response: Missing accessToken');
+                }
             }
         } catch (error) {
             console.error('[Kiro Auth] Token refresh failed:', error.message);
+            if (error.response) {
+                console.error('[Kiro Auth] Response status:', error.response.status);
+                console.error('[Kiro Auth] Response data:', error.response.data);
+            }
             throw new Error(`Token refresh failed: ${error.message}`);
         }
     }
@@ -947,6 +1069,8 @@ async initializeAuth(forceRefresh = false) {
 
         const request = {
             conversationState: {
+                agentContinuationId: uuidv4(),  // 添加 agentContinuationId
+                agentTaskType: 'vibe',          // 添加 agentTaskType
                 chatTriggerType: KIRO_CONSTANTS.CHAT_TRIGGER_TYPE_MANUAL,
                 conversationId: conversationId,
                 currentMessage: {} // Will be populated as userInputMessage
@@ -1124,7 +1248,7 @@ async initializeAuth(forceRefresh = false) {
                 content: content.parts?.map(part => part.text).join('') || ''
             }));
         }
-        
+
         if (!messages || messages.length === 0) {
             throw new Error('No messages found in request body');
         }
@@ -1133,13 +1257,17 @@ async initializeAuth(forceRefresh = false) {
 
         try {
             const token = this.accessToken; // Use the already initialized token
+
+            // 当 model 以 amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
+            const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
+            const baseDomain = `q.${this.region}.amazonaws.com`;
+
             const headers = {
                 'Authorization': `Bearer ${token}`,
                 'amz-sdk-invocation-id': `${uuidv4()}`,
+                'Host': baseDomain,  // 添加 Host header
             };
 
-            // 当 model 以 kiro-amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
-            const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
             const response = await this.axiosInstance.post(requestUrl, requestData, { headers });
             return response;
         } catch (error) {
@@ -1395,16 +1523,18 @@ async initializeAuth(forceRefresh = false) {
         const requestData = this.buildCodewhispererRequest(body.messages, model, body.tools, body.system);
 
         const token = this.accessToken;
+        const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
+        const baseDomain = `q.${this.region}.amazonaws.com`;
+
         const headers = {
             'Authorization': `Bearer ${token}`,
             'amz-sdk-invocation-id': `${uuidv4()}`,
+            'Host': baseDomain,  // 添加 Host header
         };
-
-        const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
 
         let stream = null;
         try {
-            const response = await this.axiosInstance.post(requestUrl, requestData, { 
+            const response = await this.axiosInstance.post(requestUrl, requestData, {
                 headers,
                 responseType: 'stream'
             });

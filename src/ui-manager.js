@@ -1983,6 +1983,10 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
                 const email = token.email || `unknown-${i + 1}`;
 
+                // 判断认证方式：如果有 clientId 则为 IdC，否则使用传入的 authMethod 或默认 social
+                const isIdC = !!token.clientId;
+                const authMethod = isIdC ? 'IdC' : (token.authMethod || 'social');
+
                 // 凭据文件内容
                 const credFileContent = {
                     _comment: `#${serialNumber} | Email: ${email} | Provider: ${token.provider || 'unknown'}`,
@@ -1991,11 +1995,17 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                     _importedAt: new Date().toISOString(),
                     refreshToken: token.refreshToken,
                     accessToken: token.accessToken || null,
-                    authMethod: token.authMethod || 'social',
-                    region: 'us-east-1',
+                    authMethod: authMethod,
+                    region: token.region || 'us-east-1',
                     profileArn: token.profileArn || null,
                     expiresAt: token.expiresAt || null
                 };
+
+                // IDC 认证需要 clientId 和 clientSecret
+                if (isIdC) {
+                    credFileContent.clientId = token.clientId;
+                    credFileContent.clientSecret = token.clientSecret || null;
+                }
 
                 await fs.writeFile(credFilePath, JSON.stringify(credFileContent, null, 2), 'utf8');
                 createdFiles.push(path.relative(process.cwd(), credFilePath));
