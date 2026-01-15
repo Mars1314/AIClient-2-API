@@ -296,6 +296,19 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     }
 
     /**
+     * 强制刷新令牌（用于健康检查等场景）
+     * @returns {Promise<void>}
+     */
+    async forceRefreshToken() {
+        if (!this.kiroApiService.isInitialized) {
+            console.warn("kiroApiService not initialized, attempting to re-initialize...");
+            await this.kiroApiService.initialize();
+        }
+        console.log(`[Kiro] Force refreshing token...`);
+        return this.kiroApiService.initializeAuth(true);
+    }
+
+    /**
      * 获取用量限制信息
      * @returns {Promise<Object>} 用量限制信息
      */

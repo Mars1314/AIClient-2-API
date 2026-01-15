@@ -533,6 +533,7 @@ export class ProviderPoolManager {
     /**
      * 基于用量查询的健康检测
      * 通过查询配额/余额来判断账号是否健康，不消耗实际配额
+     * 会先尝试刷新 token，确保使用最新的凭据
      * @private
      * @param {string} providerType - 提供商类型
      * @param {object} serviceAdapter - 服务适配器实例
@@ -547,6 +548,29 @@ export class ProviderPoolManager {
 
         try {
             this._log('debug', `Performing usage-based health check for ${providerConfig.uuid} (${providerType})`);
+
+            // 先尝试刷新 token，确保使用最新的凭据
+            // 优先使用 forceRefreshToken（强制刷新），否则使用 refreshToken
+            if (typeof serviceAdapter.forceRefreshToken === 'function') {
+                try {
+                    this._log('debug', `Force refreshing token before health check for ${providerConfig.uuid}`);
+                    await serviceAdapter.forceRefreshToken();
+                    this._log('debug', `Token force refresh completed for ${providerConfig.uuid}`);
+                } catch (refreshError) {
+                    this._log('warn', `Token force refresh failed for ${providerConfig.uuid}: ${refreshError.message}`);
+                    // 刷新失败不阻止健康检查，继续尝试获取用量
+                }
+            } else if (typeof serviceAdapter.refreshToken === 'function') {
+                try {
+                    this._log('debug', `Refreshing token before health check for ${providerConfig.uuid}`);
+                    await serviceAdapter.refreshToken();
+                    this._log('debug', `Token refresh completed for ${providerConfig.uuid}`);
+                } catch (refreshError) {
+                    this._log('warn', `Token refresh failed for ${providerConfig.uuid}: ${refreshError.message}`);
+                    // 刷新失败不阻止健康检查，继续尝试获取用量
+                }
+            }
+
             const rawUsageData = await serviceAdapter.getUsageLimits();
             
             // 只支持 Kiro

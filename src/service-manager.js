@@ -226,6 +226,13 @@ export async function getApiService(config, requestedModel = null, options = {})
             serviceConfig = deepmerge(config, selectedProviderConfig);
             delete serviceConfig.providerPools; // 移除 providerPools 属性
             config.uuid = serviceConfig.uuid;
+
+            // 对于 Kiro 提供商，将号池中的 KIRO_MACHINE_ID 映射为凭据级配置
+            // 这样可以区分全局 machineId 和凭据级 machineId
+            if (config.MODEL_PROVIDER === 'claude-kiro-oauth' && selectedProviderConfig.KIRO_MACHINE_ID) {
+                serviceConfig.KIRO_CREDENTIAL_MACHINE_ID = selectedProviderConfig.KIRO_MACHINE_ID;
+            }
+
             console.log(`[API Service] Using pooled configuration for ${config.MODEL_PROVIDER}: ${serviceConfig.uuid}${requestedModel ? ` (model: ${requestedModel})` : ''}`);
         } else {
             console.warn(`[API Service] No healthy provider found in pool for ${config.MODEL_PROVIDER}${requestedModel ? ` supporting model: ${requestedModel}` : ''}. Falling back to main config.`);

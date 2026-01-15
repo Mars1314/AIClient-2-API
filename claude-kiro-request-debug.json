@@ -1,14 +1,30 @@
 {
   "conversationState": {
+    "agentContinuationId": "67006edd-f274-49c4-9f42-668f67616638",
+    "agentTaskType": "vibe",
     "chatTriggerType": "MANUAL",
-    "conversationId": "a63c1be7-134a-4254-a50a-0544c63c23e5",
+    "conversationId": "1211943d-985c-43b1-b36e-519c6806bc8c",
     "currentMessage": {
       "userInputMessage": {
-        "content": "Hi",
-        "modelId": "claude-haiku-4.5",
+        "content": "python build_kg_from_json.py \n加载环境变量: /home/szjt/data/LightRAG-main/.env\n导入LightRAG失败: cannot import name 'openai_embedding' from 'lightrag.llm.openai' (/home/szjt/data/LightRAG-main/lightrag/llm/openai.py) 为什么突然这样了",
+        "modelId": "claude-opus-4.5",
         "origin": "AI_EDITOR"
       }
-    }
+    },
+    "history": [
+      {
+        "userInputMessage": {
+          "content": "[{\"text\":\"You are Claude Code, Anthropic's official CLI for Claude.\",\"type\":\"text\"},{\"text\":\"Analyze if this message indicates a new conversation topic. If it does, extract a 2-3 word title that captures the new topic. Format your response as a JSON object with two fields: 'isNewTopic' (boolean) and 'title' (string, or null if isNewTopic is false). Only include these fields, no other text. ONLY generate the JSON object, no other text (eg. no markdown).\",\"type\":\"text\"}]\n你是 Claude Code，Anthropic 官方的命令行工具。\n  我可以帮助你完成软件工程相关的任务，包括：\n  - 编写和调试代码\n  - 阅读和解释代码\n  - 修复 bug\n  - 添加新功能\n  - 重构代码\n  - 执行命令行操作\n  - 搜索和浏览代码库\n\npython build_kg_from_json.py \n加载环境变量: /home/szjt/data/LightRAG-main/.env\n导入LightRAG失败: cannot import name 'openai_embedding' from 'lightrag.llm.openai' (/home/szjt/data/LightRAG-main/lightrag/llm/openai.py) 为什么突然这样了",
+          "modelId": "claude-opus-4.5",
+          "origin": "AI_EDITOR"
+        }
+      },
+      {
+        "assistantResponseMessage": {
+          "content": "I understand. How can I help you?"
+        }
+      }
+    ]
   },
   "profileArn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
 }

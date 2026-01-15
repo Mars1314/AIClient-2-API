@@ -57,27 +57,74 @@ const KIRO_AUTH_TOKEN_FILE = "kiro-auth-token.json";
  */
 
 /**
+ * 标准化 machineId 格式
+ * 支持以下格式：
+ * - 64 字符十六进制字符串（直接返回）
+ * - UUID 格式（如 "2582956e-cc88-4669-b546-07adbffcb894"，移除连字符后补齐到 64 字符）
+ * @param {string} machineId - 原始 machineId
+ * @returns {string|null} 标准化后的 64 字符 machineId，无效格式返回 null
+ */
+function normalizeMachineId(machineId) {
+    if (!machineId) return null;
+
+    const trimmed = machineId.trim();
+
+    // 如果已经是 64 字符十六进制，直接返回
+    if (trimmed.length === 64 && /^[0-9a-fA-F]+$/.test(trimmed)) {
+        return trimmed.toLowerCase();
+    }
+
+    // 尝试解析 UUID 格式（移除连字符）
+    const withoutDashes = trimmed.replace(/-/g, '');
+
+    // UUID 去掉连字符后是 32 字符
+    if (withoutDashes.length === 32 && /^[0-9a-fA-F]+$/.test(withoutDashes)) {
+        // 补齐到 64 字符（重复一次）
+        return (withoutDashes + withoutDashes).toLowerCase();
+    }
+
+    // 无法识别的格式
+    return null;
+}
+
+/**
  * 根据凭证信息生成唯一的 Machine ID
- * 优先使用 profileArn，其次使用 refreshToken
- * 这样每个账号有独立的 machine_id，避免多账号共享同一设备指纹被检测
+ * 优先级：凭据级 machineId > 全局 machineId > profileArn > refreshToken > 随机值
+ * 这样每个账号可以有独立的设备指纹，避免多账号共享同一指纹被检测
  * @param {string} profileArn - Profile ARN
  * @param {string} refreshToken - Refresh Token
- * @param {string} customMachineId - 自定义 machine_id（可选）
+ * @param {string} globalMachineId - 全局配置的 machine_id（可选）
+ * @param {string} credentialMachineId - 凭据级配置的 machine_id（可选，优先级最高）
  * @returns {string} 64位十六进制的 machine_id
  */
-function generateMachineId(profileArn, refreshToken, customMachineId = null) {
-    // 如果配置了自定义 machineId 且长度为 64，优先使用
-    if (customMachineId && customMachineId.length === 64) {
-        return customMachineId;
+function generateMachineId(profileArn, refreshToken, globalMachineId = null, credentialMachineId = null) {
+    // 优先使用凭据级 machineId
+    if (credentialMachineId) {
+        const normalized = normalizeMachineId(credentialMachineId);
+        if (normalized) {
+            console.log('[Kiro] 使用凭据级 machineId');
+            return normalized;
+        }
+    }
+
+    // 其次使用全局配置的 machineId
+    if (globalMachineId) {
+        const normalized = normalizeMachineId(globalMachineId);
+        if (normalized) {
+            console.log('[Kiro] 使用全局配置 machineId');
+            return normalized;
+        }
     }
 
     // 如果有有效的 profileArn 则使用 profileArn 生成固定指纹
     if (profileArn && isValidProfileArn(profileArn)) {
+        console.log('[Kiro] 使用 profileArn 生成 machineId');
         return crypto.createHash('sha256').update(`KotlinNativeAPI/${profileArn}`).digest('hex');
     }
 
     // 使用 refreshToken 生成
     if (refreshToken && refreshToken.length > 0) {
+        console.log('[Kiro] 使用 refreshToken 生成 machineId');
         return crypto.createHash('sha256').update(`KotlinNativeAPI/${refreshToken}`).digest('hex');
     }
 
@@ -327,9 +374,15 @@ export class KiroApiService {
         console.log('[Kiro] Initializing Kiro API Service...');
         await this.initializeAuth();
 
-        // 使用 profileArn 或 refreshToken 生成 machineId，而不是 MAC 地址
-        // 这样每个账号有独立的设备指纹，避免多账号共享同一指纹被检测
-        this.machineId = generateMachineId(this.profileArn, this.refreshToken, this.config.KIRO_MACHINE_ID);
+        // 使用凭据级 machineId > 全局 machineId > profileArn > refreshToken 生成设备指纹
+        // 这样每个账号可以有独立的设备指纹，避免多账号共享同一指纹被检测
+        // 凭据级 machineId 从号池配置中读取，全局 machineId 从 config.KIRO_MACHINE_ID 读取
+        this.machineId = generateMachineId(
+            this.profileArn,
+            this.refreshToken,
+            this.config.KIRO_MACHINE_ID,           // 全局配置
+            this.config.KIRO_CREDENTIAL_MACHINE_ID  // 凭据级配置（号池中的 KIRO_MACHINE_ID）
+        );
         console.log(`[Kiro] Generated machineId: ${this.machineId.substring(0, 16)}...`);
 
         const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
@@ -382,9 +435,21 @@ export class KiroApiService {
     }
 
 async initializeAuth(forceRefresh = false) {
+    // 如果有 accessToken 且不是强制刷新，检查是否已过期
     if (this.accessToken && !forceRefresh) {
-        console.debug('[Kiro Auth] Access token already available and not forced refresh.');
-        return;
+        // 如果有 expiresAt，检查是否已过期
+        if (this.expiresAt) {
+            const expirationTime = this.parseExpiryDate(this.expiresAt);
+            if (expirationTime && expirationTime.getTime() > Date.now()) {
+                console.debug('[Kiro Auth] Access token already available and not expired.');
+                return;
+            }
+            console.log('[Kiro Auth] Access token expired, forcing refresh...');
+            forceRefresh = true;
+        } else {
+            console.debug('[Kiro Auth] Access token available but no expiry info, skipping refresh.');
+            return;
+        }
     }
 
     // Helper to load credentials from a file
@@ -463,6 +528,36 @@ async initializeAuth(forceRefresh = false) {
         this.profileArn = this.profileArn || mergedCredentials.profileArn;
         this.region = this.region || mergedCredentials.region;
 
+        // 自动检测 authMethod（兼容其他工具导出的凭据）
+        // 如果没有明确指定 authMethod，根据凭据特征自动判断
+        if (!this.authMethod) {
+            // 检查 provider 字段（Kiro-account-manager 导出格式）
+            const provider = mergedCredentials.provider;
+            if (provider) {
+                // Google, GitHub 等社交登录提供商
+                const socialProviders = ['Google', 'GitHub', 'Apple', 'Amazon'];
+                if (socialProviders.some(p => provider.toLowerCase().includes(p.toLowerCase()))) {
+                    this.authMethod = KIRO_CONSTANTS.AUTH_METHOD_SOCIAL;
+                    console.info(`[Kiro Auth] Auto-detected authMethod as 'social' from provider: ${provider}`);
+                }
+            }
+            // 如果有 clientId 和 clientSecret，则是 IDC 认证
+            if (!this.authMethod && this.clientId && this.clientSecret) {
+                this.authMethod = 'idc';
+                console.info('[Kiro Auth] Auto-detected authMethod as IDC (has clientId and clientSecret)');
+            }
+            // 如果 accessToken 以 'aoa' 开头，通常是 Social 认证
+            if (!this.authMethod && this.accessToken && this.accessToken.startsWith('aoa')) {
+                this.authMethod = KIRO_CONSTANTS.AUTH_METHOD_SOCIAL;
+                console.info('[Kiro Auth] Auto-detected authMethod as social (accessToken starts with "aoa")');
+            }
+            // 默认使用 social
+            if (!this.authMethod) {
+                this.authMethod = KIRO_CONSTANTS.AUTH_METHOD_SOCIAL;
+                console.info('[Kiro Auth] Using default authMethod: social');
+            }
+        }
+
         // Ensure region is set before using it in URLs
         if (!this.region) {
             console.warn('[Kiro Auth] Region not found in credentials. Using default region us-east-1 for URLs.');
@@ -496,7 +591,13 @@ async initializeAuth(forceRefresh = false) {
                 };
 
                 // 生成 machineId 用于 IDC 刷新
-                const machineId = generateMachineId(this.profileArn, this.refreshToken, this.config.KIRO_MACHINE_ID);
+                // 使用已生成的 machineId，保持一致性；如果还没初始化则临时生成
+                const machineId = this.machineId || generateMachineId(
+                    this.profileArn,
+                    this.refreshToken,
+                    this.config.KIRO_MACHINE_ID,
+                    this.config.KIRO_CREDENTIAL_MACHINE_ID
+                );
                 const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
 
                 // IDC 刷新专用的 headers，与 kiro.rs 保持一致
@@ -552,18 +653,13 @@ async initializeAuth(forceRefresh = false) {
                     refreshToken: this.refreshToken,
                 };
 
-                // Social 刷新专用的 headers
-                const machineId = generateMachineId(this.profileArn, this.refreshToken, this.config.KIRO_MACHINE_ID);
-                const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
                 const refreshDomain = `prod.${this.region}.auth.desktop.kiro.dev`;
 
+                // 简化 headers，与 Kiro-account-manager 保持一致
+                // 刷新令牌时不需要传递 machineId，避免不一致导致的问题
                 const socialHeaders = {
-                    'Accept': 'application/json, text/plain, */*',
                     'Content-Type': 'application/json',
-                    'User-Agent': `KiroIDE-${kiroVersion}-${machineId}`,
-                    'Accept-Encoding': 'gzip, compress, deflate, br',
-                    'Host': refreshDomain,
-                    'Connection': 'close',
+                    'User-Agent': 'kiro-account-manager/1.0.0',
                 };
 
                 response = await axios.post(refreshUrl, requestBody, {
@@ -2030,12 +2126,59 @@ async initializeAuth(forceRefresh = false) {
     }
 
     /**
+     * 解析多种日期格式为 Date 对象
+     * 支持格式：
+     * - ISO 8601: "2026-01-14T14:46:01.000Z"
+     * - 斜杠格式: "2026/01/14 14:46:01"
+     * - Unix 时间戳（毫秒或秒）
+     * @param {string|number} dateStr - 日期字符串或时间戳
+     * @returns {Date|null} 解析后的 Date 对象，解析失败返回 null
+     */
+    parseExpiryDate(dateStr) {
+        if (!dateStr) return null;
+
+        // 如果是数字（时间戳）
+        if (typeof dateStr === 'number') {
+            // 判断是秒还是毫秒（秒级时间戳小于 10000000000）
+            const timestamp = dateStr < 10000000000 ? dateStr * 1000 : dateStr;
+            return new Date(timestamp);
+        }
+
+        // 尝试直接解析（ISO 格式等标准格式）
+        let date = new Date(dateStr);
+        if (!isNaN(date.getTime())) {
+            return date;
+        }
+
+        // 尝试解析 "2026/01/14 14:46:01" 格式
+        // 将斜杠替换为连字符，空格替换为 T
+        const normalizedStr = dateStr.replace(/\//g, '-').replace(' ', 'T');
+        date = new Date(normalizedStr);
+        if (!isNaN(date.getTime())) {
+            return date;
+        }
+
+        // 尝试解析纯数字字符串作为时间戳
+        const numericValue = parseInt(dateStr, 10);
+        if (!isNaN(numericValue)) {
+            const timestamp = numericValue < 10000000000 ? numericValue * 1000 : numericValue;
+            return new Date(timestamp);
+        }
+
+        return null;
+    }
+
+    /**
      * Checks if the given expiresAt timestamp is within 10 minutes from now.
      * @returns {boolean} - True if expiresAt is less than 10 minutes from now, false otherwise.
      */
     isExpiryDateNear() {
         try {
-            const expirationTime = new Date(this.expiresAt);
+            const expirationTime = this.parseExpiryDate(this.expiresAt);
+            if (!expirationTime) {
+                console.warn(`[Kiro] Unable to parse expiry date: ${this.expiresAt}, treating as expired`);
+                return true; // 无法解析时视为已过期，触发刷新
+            }
             const currentTime = new Date();
             const cronNearMinutesInMillis = (this.config.CRON_NEAR_MINUTES || 10) * 60 * 1000;
             const thresholdTime = new Date(currentTime.getTime() + cronNearMinutesInMillis);
@@ -2043,7 +2186,7 @@ async initializeAuth(forceRefresh = false) {
             return expirationTime.getTime() <= thresholdTime.getTime();
         } catch (error) {
             console.error(`[Kiro] Error checking expiry date: ${this.expiresAt}, Error: ${error.message}`);
-            return false; // Treat as expired if parsing fails
+            return true; // 出错时视为已过期，触发刷新
         }
     }
 

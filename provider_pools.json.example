@@ -103,6 +103,7 @@
   "claude-kiro-oauth": [
     {
       "KIRO_OAUTH_CREDS_FILE_PATH": "./kiro_creds1.json",
+      "KIRO_MACHINE_ID": "2582956e-cc88-4669-b546-07adbffcb894",
       "uuid": "2c69d0ac-b86f-43d8-9d17-0d300afc5cfd",
       "checkModelName": null,
       "checkHealth": true,
@@ -115,6 +116,7 @@
     },
     {
       "KIRO_OAUTH_CREDS_FILE_PATH": "./kiro_creds2.json",
+      "KIRO_MACHINE_ID": "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd",
       "uuid": "7482abe6-8083-4288-bb7d-d8ecb7c461e2",
       "checkModelName": null,
       "checkHealth": true,
