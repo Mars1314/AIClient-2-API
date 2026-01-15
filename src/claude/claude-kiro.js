@@ -8,26 +8,26 @@ import * as http from 'http';
 import * as https from 'https';
 import { getProviderModels } from '../provider-models.js';
 import { countTokens } from '@anthropic-ai/tokenizer';
-import { json } from 'stream/consumers';
+import { acquireFileLock, withDeduplication } from '../utils/file-lock.js';
+import { isRetryableNetworkError, repairJson } from '../utils/common.js';
 
 const KIRO_CONSTANTS = {
     REFRESH_URL: 'https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken',
     REFRESH_IDC_URL: 'https://oidc.{{region}}.amazonaws.com/token',
-    // 使用 q.{region}.amazonaws.com 而不是 codewhisperer
-    BASE_URL: 'https://q.{{region}}.amazonaws.com/generateAssistantResponse',
-    AMAZON_Q_URL: 'https://q.{{region}}.amazonaws.com/SendMessageStreaming',
-    USAGE_LIMITS_URL: 'https://q.{{region}}.amazonaws.com/getUsageLimits',
+    // 使用 codewhisperer.{region}.amazonaws.com
+    BASE_URL: 'https://codewhisperer.{{region}}.amazonaws.com/generateAssistantResponse',
+    AMAZON_Q_URL: 'https://codewhisperer.{{region}}.amazonaws.com/SendMessageStreaming',
+    USAGE_LIMITS_URL: 'https://codewhisperer.{{region}}.amazonaws.com/getUsageLimits',
     DEFAULT_MODEL_NAME: 'claude-opus-4-5',
     AXIOS_TIMEOUT: 120000, // 2 minutes timeout
     USER_AGENT: 'KiroIDE',
-    KIRO_VERSION: '0.8.0',
+    KIRO_VERSION: '0.7.5',
     CONTENT_TYPE_JSON: 'application/json',
     ACCEPT_JSON: 'application/json',
     AUTH_METHOD_SOCIAL: 'social',
     CHAT_TRIGGER_TYPE_MANUAL: 'MANUAL',
     ORIGIN_AI_EDITOR: 'AI_EDITOR',
-    // IDC 刷新专用的 x-amz-user-agent
-    IDC_AMZ_USER_AGENT: 'aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE',
+    TOTAL_CONTEXT_TOKENS: 172500,
 };
 
 // 从 provider-models.js 获取支持的模型列表
@@ -89,48 +89,30 @@ function normalizeMachineId(machineId) {
 
 /**
  * 根据凭证信息生成唯一的 Machine ID
- * 优先级：凭据级 machineId > 全局 machineId > profileArn > refreshToken > 随机值
- * 这样每个账号可以有独立的设备指纹，避免多账号共享同一指纹被检测
- * @param {string} profileArn - Profile ARN
- * @param {string} refreshToken - Refresh Token
- * @param {string} globalMachineId - 全局配置的 machine_id（可选）
- * @param {string} credentialMachineId - 凭据级配置的 machine_id（可选，优先级最高）
+ * 优先级：uuid > profileArn > clientId > fallback
+ * @param {Object} credentials - 凭证对象
  * @returns {string} 64位十六进制的 machine_id
  */
-function generateMachineId(profileArn, refreshToken, globalMachineId = null, credentialMachineId = null) {
-    // 优先使用凭据级 machineId
-    if (credentialMachineId) {
-        const normalized = normalizeMachineId(credentialMachineId);
-        if (normalized) {
-            console.log('[Kiro] 使用凭据级 machineId');
-            return normalized;
-        }
-    }
+function generateMachineIdFromConfig(credentials) {
+    const uniqueKey = credentials.uuid || credentials.profileArn || credentials.clientId || "KIRO_DEFAULT_MACHINE";
+    return crypto.createHash('sha256').update(uniqueKey).digest('hex');
+}
 
-    // 其次使用全局配置的 machineId
-    if (globalMachineId) {
-        const normalized = normalizeMachineId(globalMachineId);
-        if (normalized) {
-            console.log('[Kiro] 使用全局配置 machineId');
-            return normalized;
-        }
-    }
+/**
+ * 获取系统运行时信息
+ * @returns {Object} 包含 osName 和 nodeVersion
+ */
+function getSystemRuntimeInfo() {
+    const osPlatform = os.platform();
+    const osRelease = os.release();
+    const nodeVersion = process.version.replace('v', '');
 
-    // 如果有有效的 profileArn 则使用 profileArn 生成固定指纹
-    if (profileArn && isValidProfileArn(profileArn)) {
-        console.log('[Kiro] 使用 profileArn 生成 machineId');
-        return crypto.createHash('sha256').update(`KotlinNativeAPI/${profileArn}`).digest('hex');
-    }
+    let osName = osPlatform;
+    if (osPlatform === 'win32') osName = `windows#${osRelease}`;
+    else if (osPlatform === 'darwin') osName = `macos#${osRelease}`;
+    else osName = `${osPlatform}#${osRelease}`;
 
-    // 使用 refreshToken 生成
-    if (refreshToken && refreshToken.length > 0) {
-        console.log('[Kiro] 使用 refreshToken 生成 machineId');
-        return crypto.createHash('sha256').update(`KotlinNativeAPI/${refreshToken}`).digest('hex');
-    }
-
-    // 没有有效的凭证，返回随机值（不推荐）
-    console.warn('[Kiro] 无法生成稳定的 machineId，将使用随机值');
-    return crypto.createHash('sha256').update(`KotlinNativeAPI/${uuidv4()}`).digest('hex');
+    return { osName, nodeVersion };
 }
 
 /**
@@ -196,22 +178,6 @@ function findMatchingBracket(text, startPos, openChar = '[', closeChar = ']') {
     return -1;
 }
 
-
-/**
- * 尝试修复常见的 JSON 格式问题
- * @param {string} jsonStr - 可能有问题的 JSON 字符串
- * @returns {string} 修复后的 JSON 字符串
- */
-function repairJson(jsonStr) {
-    let repaired = jsonStr;
-    // 移除尾部逗号
-    repaired = repaired.replace(/,\s*([}\]])/g, '$1');
-    // 为未引用的键添加引号
-    repaired = repaired.replace(/([{,]\s*)([a-zA-Z0-9_]+?)\s*:/g, '$1"$2":');
-    // 确保字符串值被正确引用
-    repaired = repaired.replace(/:\s*([a-zA-Z0-9_]+)(?=[,\}\]])/g, ':"$1"');
-    return repaired;
-}
 
 /**
  * 解析单个工具调用文本
@@ -374,22 +340,17 @@ export class KiroApiService {
         console.log('[Kiro] Initializing Kiro API Service...');
         await this.initializeAuth();
 
-        // 使用凭据级 machineId > 全局 machineId > profileArn > refreshToken 生成设备指纹
-        // 这样每个账号可以有独立的设备指纹，避免多账号共享同一指纹被检测
-        // 凭据级 machineId 从号池配置中读取，全局 machineId 从 config.KIRO_MACHINE_ID 读取
-        this.machineId = generateMachineId(
-            this.profileArn,
-            this.refreshToken,
-            this.config.KIRO_MACHINE_ID,           // 全局配置
-            this.config.KIRO_CREDENTIAL_MACHINE_ID  // 凭据级配置（号池中的 KIRO_MACHINE_ID）
-        );
-        console.log(`[Kiro] Generated machineId: ${this.machineId.substring(0, 16)}...`);
+        // 根据当前加载的凭证生成唯一的 Machine ID
+        const machineId = generateMachineIdFromConfig({
+            uuid: this.uuid,
+            profileArn: this.profileArn,
+            clientId: this.clientId
+        });
+        console.log(`[Kiro] Generated machineId: ${machineId.substring(0, 16)}...`);
 
         const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
-        // 随机选择系统版本
-        const systemVersions = ['darwin#24.6.0', 'win32#10.0.22631'];
-        const osName = systemVersions[Math.floor(Math.random() * systemVersions.length)];
-        const nodeVersion = '22.21.1';
+        // 动态获取系统信息
+        const { osName, nodeVersion } = getSystemRuntimeInfo();
 
         // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
         const httpAgent = new http.Agent({
@@ -405,9 +366,9 @@ export class KiroApiService {
             timeout: 120000,
         });
 
-        // 构建与 kiro.rs 一致的 headers
-        const xAmzUserAgent = `aws-sdk-js/1.0.27 KiroIDE-${kiroVersion}-${this.machineId}`;
-        const userAgent = `aws-sdk-js/1.0.27 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererstreaming#1.0.27 m/E KiroIDE-${kiroVersion}-${this.machineId}`;
+        // 构建与正常项目一致的 headers (SDK 版本 1.0.0, api/codewhispererruntime)
+        const xAmzUserAgent = `aws-sdk-js/1.0.0 KiroIDE-${kiroVersion}-${machineId}`;
+        const userAgent = `aws-sdk-js/1.0.0 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererruntime#1.0.0 m/E KiroIDE-${kiroVersion}-${machineId}`;
 
         const axiosConfig = {
             timeout: KIRO_CONSTANTS.AXIOS_TIMEOUT,
@@ -416,12 +377,11 @@ export class KiroApiService {
             headers: {
                 'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
                 'Accept': KIRO_CONSTANTS.ACCEPT_JSON,
-                'amz-sdk-request': 'attempt=1; max=3',
+                'amz-sdk-request': 'attempt=1; max=1',
                 'x-amzn-kiro-agent-mode': 'vibe',
-                'x-amzn-codewhisperer-optout': 'true',  // 添加这个重要的 header
                 'x-amz-user-agent': xAmzUserAgent,
                 'user-agent': userAgent,
-                'Connection': 'close',  // 与 kiro.rs 一致
+                'Connection': 'close',
             },
         };
 
@@ -431,6 +391,21 @@ export class KiroApiService {
         }
 
         this.axiosInstance = axios.create(axiosConfig);
+
+        // 创建专用于 Social 刷新的实例（只设置 Content-Type）
+        const socialRefreshConfig = {
+            timeout: KIRO_CONSTANTS.AXIOS_TIMEOUT,
+            httpAgent,
+            httpsAgent,
+            headers: {
+                'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
+            },
+        };
+        if (!this.useSystemProxy) {
+            socialRefreshConfig.proxy = false;
+        }
+        this.axiosSocialRefreshInstance = axios.create(socialRefreshConfig);
+
         this.isInitialized = true;
     }
 
@@ -452,16 +427,30 @@ async initializeAuth(forceRefresh = false) {
         }
     }
 
-    // Helper to load credentials from a file
+    // 获取凭证文件路径，用于去重锁的 key
+    const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+
+    // Helper to load credentials from a file (带 JSON 修复)
     const loadCredentialsFromFile = async (filePath) => {
         try {
             const fileContent = await fs.readFile(filePath, 'utf8');
-            return JSON.parse(fileContent);
+            try {
+                return JSON.parse(fileContent);
+            } catch (parseError) {
+                console.warn('[Kiro Auth] JSON parse failed, attempting repair...');
+                try {
+                    const repaired = repairJson(fileContent);
+                    const result = JSON.parse(repaired);
+                    console.info('[Kiro Auth] JSON repair successful');
+                    return result;
+                } catch (repairError) {
+                    console.error('[Kiro Auth] JSON repair failed:', repairError.message);
+                    return null;
+                }
+            }
         } catch (error) {
             if (error.code === 'ENOENT') {
                 console.debug(`[Kiro Auth] Credential file not found: ${filePath}`);
-            } else if (error instanceof SyntaxError) {
-                console.warn(`[Kiro Auth] Failed to parse JSON from ${filePath}: ${error.message}`);
             } else {
                 console.warn(`[Kiro Auth] Failed to read credential file ${filePath}: ${error.message}`);
             }
@@ -469,17 +458,28 @@ async initializeAuth(forceRefresh = false) {
         }
     };
 
-    // Helper to save credentials to a file
+    // Helper to save credentials to a file (with file locking)
     const saveCredentialsToFile = async (filePath, newData) => {
+        // 获取文件锁，防止并发写入
+        const releaseLock = await acquireFileLock(filePath);
         try {
             let existingData = {};
             try {
                 const fileContent = await fs.readFile(filePath, 'utf8');
-                existingData = JSON.parse(fileContent);
+                try {
+                    existingData = JSON.parse(fileContent);
+                } catch (parseError) {
+                    // 尝试修复 JSON
+                    try {
+                        existingData = JSON.parse(repairJson(fileContent));
+                    } catch (repairError) {
+                        console.warn(`[Kiro Auth] Could not parse existing token file, will overwrite: ${filePath}`);
+                    }
+                }
             } catch (readError) {
                 if (readError.code === 'ENOENT') {
                     console.debug(`[Kiro Auth] Token file not found, creating new one: ${filePath}`);
-                } else {
+            } else {
                     console.warn(`[Kiro Auth] Could not read existing token file ${filePath}: ${readError.message}`);
                 }
             }
@@ -488,6 +488,8 @@ async initializeAuth(forceRefresh = false) {
             console.info(`[Kiro Auth] Updated token file: ${filePath}`);
         } catch (error) {
             console.error(`[Kiro Auth] Failed to write token to file ${filePath}: ${error.message}`);
+        } finally {
+            releaseLock(); // 确保锁被释放
         }
     };
 
@@ -577,6 +579,30 @@ async initializeAuth(forceRefresh = false) {
         if (!this.refreshToken) {
             throw new Error('No refresh token available to refresh access token.');
         }
+
+        // 使用去重锁：多个并发刷新请求只执行一次，共享结果
+        const dedupeKey = `kiro-token-refresh:${tokenFilePath}`;
+        await withDeduplication(dedupeKey, async () => {
+            await this._doTokenRefresh(saveCredentialsToFile, tokenFilePath);
+        });
+
+        // 如果是等待其他请求完成的刷新，需要重新加载凭证
+        if (!this.accessToken || this.isExpiryDateNear()) {
+            await this._reloadCredentialsAfterRefresh(tokenFilePath);
+        }
+    }
+
+    if (!this.accessToken) {
+        throw new Error('No access token available after initialization and refresh attempts.');
+    }
+}
+
+    /**
+     * 执行实际的 token 刷新操作（内部方法）
+     * @param {Function} saveCredentialsToFile - 保存凭证的函数
+     * @param {string} tokenFilePath - 凭证文件路径
+     */
+    async _doTokenRefresh(saveCredentialsToFile, tokenFilePath) {
         try {
             let response;
 
@@ -589,16 +615,6 @@ async initializeAuth(forceRefresh = false) {
                     refreshToken: this.refreshToken,
                     grantType: 'refresh_token',
                 };
-
-                // 生成 machineId 用于 IDC 刷新
-                // 使用已生成的 machineId，保持一致性；如果还没初始化则临时生成
-                const machineId = this.machineId || generateMachineId(
-                    this.profileArn,
-                    this.refreshToken,
-                    this.config.KIRO_MACHINE_ID,
-                    this.config.KIRO_CREDENTIAL_MACHINE_ID
-                );
-                const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
 
                 // IDC 刷新专用的 headers，与 kiro.rs 保持一致
                 const idcHeaders = {
@@ -619,7 +635,6 @@ async initializeAuth(forceRefresh = false) {
                 });
 
                 console.log('[Kiro Auth] IDC Token refresh response: ok');
-                console.log('[Kiro Auth] IDC Response keys:', Object.keys(response.data || {}));
 
                 // IDC 响应可能使用 snake_case (access_token) 或 camelCase (accessToken)
                 const accessToken = response.data.access_token || response.data.accessToken;
@@ -635,8 +650,6 @@ async initializeAuth(forceRefresh = false) {
                     this.expiresAt = expiresAt;
                     console.info('[Kiro Auth] IDC Access token refreshed successfully');
 
-                    // Update the token file
-                    const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
                     const updatedTokenData = {
                         accessToken: this.accessToken,
                         refreshToken: this.refreshToken,
@@ -647,25 +660,14 @@ async initializeAuth(forceRefresh = false) {
                     throw new Error('Invalid IDC refresh response: Missing access_token');
                 }
             } else {
-                // Social 认证方式
+                // Social 认证方式 - 使用专用的刷新实例
                 const refreshUrl = this.refreshUrl;
                 const requestBody = {
                     refreshToken: this.refreshToken,
                 };
 
-                const refreshDomain = `prod.${this.region}.auth.desktop.kiro.dev`;
-
-                // 简化 headers，与 Kiro-account-manager 保持一致
-                // 刷新令牌时不需要传递 machineId，避免不一致导致的问题
-                const socialHeaders = {
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'kiro-account-manager/1.0.0',
-                };
-
-                response = await axios.post(refreshUrl, requestBody, {
-                    headers: socialHeaders,
-                    proxy: this.useSystemProxy ? undefined : false,
-                });
+                // 使用专用的 axiosSocialRefreshInstance（只有 Content-Type header）
+                response = await this.axiosSocialRefreshInstance.post(refreshUrl, requestBody);
 
                 console.log('[Kiro Auth] Social Token refresh response: ok');
 
@@ -682,8 +684,6 @@ async initializeAuth(forceRefresh = false) {
                     this.expiresAt = expiresAt;
                     console.info('[Kiro Auth] Social Access token refreshed successfully');
 
-                    // Update the token file
-                    const tokenFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
                     const updatedTokenData = {
                         accessToken: this.accessToken,
                         refreshToken: this.refreshToken,
@@ -707,10 +707,39 @@ async initializeAuth(forceRefresh = false) {
         }
     }
 
-    if (!this.accessToken) {
-        throw new Error('No access token available after initialization and refresh attempts.');
+    /**
+     * 并发刷新后重新加载凭证（内部方法）
+     * 当多个请求等待同一个刷新操作完成时，需要重新从文件加载最新凭证
+     * @param {string} tokenFilePath - 凭证文件路径
+     */
+    async _reloadCredentialsAfterRefresh(tokenFilePath) {
+        try {
+            const { promises: fs } = await import('fs');
+            const fileContent = await fs.readFile(tokenFilePath, 'utf8');
+            let credentials;
+            try {
+                credentials = JSON.parse(fileContent);
+            } catch (parseError) {
+                credentials = JSON.parse(repairJson(fileContent));
+            }
+
+            if (credentials.accessToken) {
+                this.accessToken = credentials.accessToken;
+            }
+            if (credentials.refreshToken) {
+                this.refreshToken = credentials.refreshToken;
+            }
+            if (credentials.expiresAt) {
+                this.expiresAt = credentials.expiresAt;
+            }
+            if (credentials.profileArn) {
+                this.profileArn = credentials.profileArn;
+            }
+            console.info('[Kiro Auth] Reloaded credentials after concurrent refresh');
+        } catch (error) {
+            console.warn('[Kiro Auth] Failed to reload credentials after refresh:', error.message);
+        }
     }
-}
 
     /**
      * Extract text content from OpenAI message format
@@ -1361,7 +1390,6 @@ async initializeAuth(forceRefresh = false) {
             const headers = {
                 'Authorization': `Bearer ${token}`,
                 'amz-sdk-invocation-id': `${uuidv4()}`,
-                'Host': baseDomain,  // 添加 Host header
             };
 
             const response = await this.axiosInstance.post(requestUrl, requestData, { headers });
@@ -1670,25 +1698,70 @@ async initializeAuth(forceRefresh = false) {
             if (stream && typeof stream.destroy === 'function') {
                 stream.destroy();
             }
-            
-            if (error.response?.status === 403 && !isRetry) {
+
+            const status = error.response?.status;
+            const errorCode = error.code;
+            const errorMessage = error.message || '';
+
+            // 检查是否为可重试的网络错误
+            const isNetworkError = isRetryableNetworkError(error);
+
+            // Handle 401 (Unauthorized) - try to refresh token first
+            if (status === 401 && !isRetry) {
+                console.log('[Kiro] Received 401 in stream. Attempting token refresh and retrying...');
+                try {
+                    await this.initializeAuth(true);
+                    yield* this.streamApiReal(method, model, body, true, retryCount);
+                    return;
+                } catch (refreshError) {
+                    console.error('[Kiro] Token refresh failed during 401 retry:', refreshError.message);
+                    throw refreshError;
+                }
+            }
+
+            // Handle 403 (Forbidden) - try to refresh token
+            if (status === 403 && !isRetry) {
                 console.log('[Kiro] Received 403 in stream. Attempting token refresh and retrying...');
-                await this.initializeAuth(true);
-                yield* this.streamApiReal(method, model, body, true, retryCount);
+                try {
+                    await this.initializeAuth(true);
+                    yield* this.streamApiReal(method, model, body, true, retryCount);
+                    return;
+                } catch (refreshError) {
+                    console.error('[Kiro] Token refresh failed during 403 retry:', refreshError.message);
+                    throw refreshError;
+                }
+            }
+
+            // Handle 429 (Too Many Requests) with exponential backoff
+            if (status === 429 && retryCount < maxRetries) {
+                const delay = baseDelay * Math.pow(2, retryCount);
+                console.log(`[Kiro] Received 429 in stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1);
                 return;
             }
-            
-            if (error.response?.status === 429 && retryCount < maxRetries) {
+
+            // Handle 5xx server errors with exponential backoff
+            if (status >= 500 && status < 600 && retryCount < maxRetries) {
                 const delay = baseDelay * Math.pow(2, retryCount);
-                console.log(`[Kiro] Received 429 in stream. Retrying in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1);
+                console.log(`[Kiro] Received ${status} server error in stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1);
+                return;
+            }
+
+            // Handle network errors with exponential backoff
+            if (isNetworkError && retryCount < maxRetries) {
+                const delay = baseDelay * Math.pow(2, retryCount);
+                console.log(`[Kiro] Network error (${errorCode || errorMessage}) in stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1);
                 return;
             }
 
             // 对于 400 错误，尝试获取更详细的错误信息
-            if (error.response?.status === 400) {
-                console.error('[Kiro] Stream API call failed with 400 Bad Request. Status:', error.response?.status);
+            if (status === 400) {
+                console.error('[Kiro] Stream API call failed with 400 Bad Request. Status:', status);
             }
             console.error('[Kiro] Stream API call failed:', error.message);
             throw error;
