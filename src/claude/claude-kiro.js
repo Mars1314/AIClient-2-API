@@ -35,6 +35,8 @@ const KIRO_MODELS = getProviderModels('claude-kiro-oauth');
 
 // 完整的模型映射表
 const FULL_MODEL_MAPPING = {
+    "claude-opus-4-6":"claude-opus-4.6",
+    "claude-sonnet-4-6":"claude-sonnet-4.6",
     "claude-opus-4-5":"claude-opus-4.5",
     "claude-opus-4-5-20251101":"claude-opus-4.5",
     "claude-haiku-4-5":"claude-haiku-4.5",
