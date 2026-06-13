@@ -233,10 +233,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             // console.log(`data: ${JSON.stringify(getOpenAIStreamChunkStop(model))}\n`);
         }
 
-        // 流式请求成功完成，统计使用次数，错误次数重置为0
+        // 流式请求成功完成，重置错误计数（如果有的话）
         if (providerPoolManager && pooluuid) {
-            console.log(`[Provider Pool] Increasing usage count for ${toProvider} (${pooluuid}) after successful stream request`);
-            providerPoolManager.markProviderHealthy(toProvider, {
+            console.log(`[Provider Pool] Request successful for ${toProvider} (${pooluuid}), resetting error count if any`);
+            providerPoolManager.markProviderSuccess(toProvider, {
                 uuid: pooluuid
             });
         }
@@ -288,10 +288,10 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         await logConversation('output', responseText, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME);
         // fs.writeFile('oldResponse'+Date.now()+'.json', JSON.stringify(clientResponse));
         
-        // 一元请求成功完成，统计使用次数，错误次数重置为0
+        // 一元请求成功完成，重置错误计数（如果有的话）
         if (providerPoolManager && pooluuid) {
-            console.log(`[Provider Pool] Increasing usage count for ${toProvider} (${pooluuid}) after successful unary request`);
-            providerPoolManager.markProviderHealthy(toProvider, {
+            console.log(`[Provider Pool] Request successful for ${toProvider} (${pooluuid}), resetting error count if any`);
+            providerPoolManager.markProviderSuccess(toProvider, {
                 uuid: pooluuid
             });
         }

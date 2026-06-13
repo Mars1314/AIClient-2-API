@@ -409,11 +409,21 @@ export class KiroApiService {
         await this.initializeAuth();
 
         // 根据当前加载的凭证生成唯一的 Machine ID
+        // **改进**：每个账号使用独立的指纹参数
+        const machineIdConfig = {
+            ...this.config,
+            // 如果配置了账号级别的指纹盐值，优先使用
+            MACHINE_ID_SALT: this.config.MACHINE_ID_SALT_PER_ACCOUNT || this.config.MACHINE_ID_SALT
+        };
+        
         const machineId = generateMachineIdFromConfig({
             uuid: this.uuid,
             profileArn: this.profileArn,
             clientId: this.clientId
-        }, this.config);
+        }, machineIdConfig);
+        
+        // 存储到实例中，供后续使用
+        this.machineId = machineId;
         console.log(`[Kiro] Generated machineId: ${machineId.substring(0, 16)}...`);
 
         const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
@@ -439,6 +449,10 @@ export class KiroApiService {
         const xAmzUserAgent = `aws-sdk-js/1.0.0 KiroIDE-${kiroVersion}-${machineId}`;
         const userAgent = `aws-sdk-js/1.0.0 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererruntime#1.0.0 m/E KiroIDE-${kiroVersion}-${machineId}`;
 
+        // **改进**：支持账号级别的浏览器特征配置
+        const browserVersion = this.config.BROWSER_VERSION || '120';
+        const platformName = this.config.PLATFORM_NAME || (osPlatform === 'win32' ? 'Windows' : osPlatform === 'darwin' ? 'macOS' : 'Linux');
+        
         // 添加更多真实的浏览器/客户端特征
         const commonHeaders = {
             'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
@@ -448,12 +462,12 @@ export class KiroApiService {
             'x-amz-user-agent': xAmzUserAgent,
             'user-agent': userAgent,
             'Connection': 'close',
-            // 添加更多反检测请求头
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="120"`,
+            // 添加更多反检测请求头（支持自定义）
+            'Accept-Encoding': this.config.ACCEPT_ENCODING || 'gzip, deflate, br',
+            'Accept-Language': this.config.ACCEPT_LANGUAGE || 'en-US,en;q=0.9',
+            'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="${browserVersion}"`,
             'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': `"${osPlatform === 'win32' ? 'Windows' : osPlatform === 'darwin' ? 'macOS' : 'Linux'}"`,
+            'sec-ch-ua-platform': `"${platformName}"`,
         };
 
         const axiosConfig = {

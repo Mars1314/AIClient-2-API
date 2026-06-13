@@ -23,9 +23,10 @@ export class ProviderPoolManager {
         this.providerPools = providerPools;
         this.globalConfig = options.globalConfig || {}; // 存储全局配置
         this.providerStatus = {}; // Tracks health and usage for each provider instance
-        this.roundRobinIndex = {}; // Tracks the current index for round-robin selection for each provider type
-        // 使用 ?? 运算符确保 0 也能被正确设置，而不是被 || 替换为默认值
-        this.maxErrorCount = options.maxErrorCount ?? 3; // Default to 3 errors before marking unhealthy
+        this.roundRobinIndex = {}; // Tracks the current index for round-robin selection for each provider type (kept for compatibility, but not used in failover mode)
+        // **改为故障转移策略**：使用 ?? 运算符确保 0 也能被正确设置
+        // 默认需要连续 2 次失败才标记为不健康
+        this.maxErrorCount = options.maxErrorCount ?? 2; // Default to 2 errors (consecutive failures)
         this.healthCheckInterval = options.healthCheckInterval ?? 10 * 60 * 1000; // Default to 10 minutes
         
         // 日志级别控制
@@ -104,12 +105,15 @@ export class ProviderPoolManager {
 
     /**
      * Selects a provider from the pool for a given provider type.
-     * Currently uses a simple round-robin for healthy providers.
+     * Uses **Failover** strategy: always uses the first healthy provider, 
+     * only switches to next when current one fails (requires 2 consecutive failures).
      * If requestedModel is provided, providers that don't support the model will be excluded.
-     * If no healthy providers are available, will fallback to unhealthy (but not disabled) providers.
      * Unhealthy providers that have passed the recovery interval will be automatically re-checked.
      * @param {string} providerType - The type of provider to select (e.g., 'gemini-cli', 'openai-custom').
      * @param {string} [requestedModel] - Optional. The model name to filter providers by.
+     * @param {object} [options] - Optional configuration
+     * @param {boolean} [options.skipUsageCount] - If true, don't increment usage count
+     * @param {boolean} [options.forceNext] - If true, force select next provider (used for failover)
      * @returns {object|null} The selected provider's configuration, or null if no provider is found.
      */
     selectProvider(providerType, requestedModel = null, options = {}) {
@@ -162,27 +166,28 @@ export class ProviderPoolManager {
             }
         }
 
-        // 优先选择健康的 provider
+        // **Failover 策略**：优先选择健康的 provider，按顺序选择第一个
         let candidateProviders = enabledProviders.filter(p => p.config.isHealthy);
         let isFallback = false;
         
-        // 如果没有健康的，fallback 到不健康的
+        // 如果没有健康的，fallback 到不健康的（但仍按顺序）
         if (candidateProviders.length === 0) {
             candidateProviders = enabledProviders;
             isFallback = true;
             this._log('warn', `No healthy providers for type: ${providerType}, falling back to unhealthy providers`);
         }
 
-        // 为每个提供商类型和模型组合维护独立的轮询索引
-        const indexKey = requestedModel ? `${providerType}:${requestedModel}` : providerType;
-        const currentIndex = this.roundRobinIndex[indexKey] || 0;
-        
-        // 使用取模确保索引始终在有效范围内
-        const providerIndex = currentIndex % candidateProviders.length;
-        const selected = candidateProviders[providerIndex];
-        
-        // 更新下次轮询的索引
-        this.roundRobinIndex[indexKey] = (currentIndex + 1) % candidateProviders.length;
+        // **核心改动**：始终选择第一个可用的provider（不再轮询）
+        // 如果设置了 forceNext，跳过第一个（用于故障转移场景）
+        let selected;
+        if (options.forceNext && candidateProviders.length > 1) {
+            // 故障转移：选择下一个可用provider
+            selected = candidateProviders[1];
+            this._log('info', `Failover: switching to next provider ${selected.config.uuid} for ${providerType}`);
+        } else {
+            // 正常情况：始终选择第一个健康的provider
+            selected = candidateProviders[0];
+        }
         
         // 更新使用信息（除非明确跳过）
         if (!options.skipUsageCount) {
@@ -191,21 +196,23 @@ export class ProviderPoolManager {
             this._debouncedSave(providerType);
         }
 
-        this._log('debug', `Selected provider for ${providerType} (round-robin${isFallback ? ', fallback' : ''}): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
+        this._log('debug', `Selected provider for ${providerType} (failover${isFallback ? ', fallback' : ''}): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
         
         return selected.config;
     }
 
     /**
      * Marks a provider as unhealthy (e.g., after an API error).
+     * **Requires 2 consecutive failures** before marking as unhealthy.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {string} [errorMessage] - Optional error message to store.
+     * @returns {boolean} Returns true if provider was marked unhealthy, false otherwise.
      */
     markProviderUnhealthy(providerType, providerConfig, errorMessage = null) {
         if (!providerConfig?.uuid) {
             this._log('error', 'Invalid providerConfig in markProviderUnhealthy');
-            return;
+            return false;
         }
 
         const provider = this._findProvider(providerType, providerConfig.uuid);
@@ -218,19 +225,25 @@ export class ProviderPoolManager {
                 provider.config.lastErrorMessage = errorMessage;
             }
 
+            // **关键改动**：需要达到 maxErrorCount（默认2次）才标记为不健康
             if (provider.config.errorCount >= this.maxErrorCount) {
+                const wasHealthy = provider.config.isHealthy;
                 provider.config.isHealthy = false;
-                this._log('warn', `Marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Total errors: ${provider.config.errorCount}`);
+                this._log('warn', `❌ Provider marked as UNHEALTHY: ${providerConfig.uuid} (${providerType}). Consecutive errors: ${provider.config.errorCount}/${this.maxErrorCount}`);
+                this._debouncedSave(providerType);
+                return wasHealthy; // 返回true表示状态发生了变化
             } else {
-                this._log('warn', `Provider ${providerConfig.uuid} for type ${providerType} error count: ${provider.config.errorCount}/${this.maxErrorCount}. Still healthy.`);
+                this._log('warn', `⚠️ Provider ${providerConfig.uuid} (${providerType}) error count: ${provider.config.errorCount}/${this.maxErrorCount}. Still healthy, need ${this.maxErrorCount - provider.config.errorCount} more error(s) to mark unhealthy.`);
+                this._debouncedSave(providerType);
+                return false; // 仍然健康
             }
-            
-            this._debouncedSave(providerType);
         }
+        return false;
     }
 
     /**
      * Marks a provider as healthy.
+     * **Resets error count** to allow retry from scratch.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {boolean} resetUsageCount - Whether to reset usage count (optional, default: false).
@@ -244,8 +257,9 @@ export class ProviderPoolManager {
 
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (provider) {
+            const wasUnhealthy = !provider.config.isHealthy;
             provider.config.isHealthy = true;
-            provider.config.errorCount = 0;
+            provider.config.errorCount = 0; // **重要**：重置错误计数
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
             
@@ -262,9 +276,40 @@ export class ProviderPoolManager {
                 provider.config.usageCount++;
                 provider.config.lastUsed = new Date().toISOString();
             }
-            this._log('info', `Marked provider as healthy: ${provider.config.uuid} for type ${providerType}${resetUsageCount ? ' (usage count reset)' : ''}`);
+            
+            if (wasUnhealthy) {
+                this._log('info', `✅ Provider RECOVERED and marked as healthy: ${provider.config.uuid} (${providerType})${resetUsageCount ? ' (usage count reset)' : ''}`);
+            } else {
+                this._log('info', `✅ Provider confirmed healthy: ${provider.config.uuid} (${providerType})${resetUsageCount ? ' (usage count reset)' : ''}`);
+            }
             
             this._debouncedSave(providerType);
+        }
+    }
+
+    /**
+     * Records a successful request for a provider.
+     * **Resets error count** if there were previous errors.
+     * This prevents a single failure from affecting the provider's health status.
+     * @param {string} providerType - The type of the provider.
+     * @param {object} providerConfig - The configuration of the provider.
+     */
+    markProviderSuccess(providerType, providerConfig) {
+        if (!providerConfig?.uuid) {
+            this._log('error', 'Invalid providerConfig in markProviderSuccess');
+            return;
+        }
+
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (provider) {
+            // 如果之前有错误，重置错误计数（成功请求表示provider恢复正常）
+            if (provider.config.errorCount > 0) {
+                this._log('info', `Provider ${providerConfig.uuid} (${providerType}) recovered after ${provider.config.errorCount} errors. Resetting error count.`);
+                provider.config.errorCount = 0;
+                provider.config.lastErrorTime = null;
+                provider.config.lastErrorMessage = null;
+                this._debouncedSave(providerType);
+            }
         }
     }
 
