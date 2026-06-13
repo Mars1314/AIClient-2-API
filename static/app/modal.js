@@ -1191,6 +1191,58 @@ function bindAddFormPasswordToggleListeners(form) {
  * 添加新提供商
  * @param {string} providerType - 提供商类型
  */
+/**
+ * 生成随机的设备指纹配置
+ * 防止账号被封的关键
+ */
+function generateFingerprint() {
+    // 生成随机盐值（30字符）
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let salt = 'auto-generated-';
+    for (let i = 0; i < 30; i++) {
+        salt += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    // 随机浏览器版本 (120-131)
+    const majorVersions = [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131];
+    const majorVersion = majorVersions[Math.floor(Math.random() * majorVersions.length)];
+    const minorVersion = Math.floor(Math.random() * 10);
+    const build = 6000 + Math.floor(Math.random() * 1000);
+    const patch = Math.floor(Math.random() * 300);
+    const browserVersion = `${majorVersion}.${minorVersion}.${build}.${patch}`;
+    
+    // 随机平台
+    const platforms = ['Windows', 'macOS', 'Linux'];
+    const platform = platforms[Math.floor(Math.random() * platforms.length)];
+    
+    // 随机语言偏好
+    const languages = [
+        'en-US,en;q=0.9',
+        'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+        'en-GB,en;q=0.9,en-US;q=0.8',
+        'en-US,en;q=0.9,ja;q=0.8',
+        'en-US,en;q=0.9,es;q=0.8',
+        'en-US,en;q=0.9,fr;q=0.8',
+        'en-US,en;q=0.9,de;q=0.8'
+    ];
+    const language = languages[Math.floor(Math.random() * languages.length)];
+    
+    // 随机请求间隔（2-5秒范围内）
+    const minInterval = 2000 + Math.floor(Math.random() * 1000); // 2000-3000
+    const maxInterval = 5000 + Math.floor(Math.random() * 2000); // 5000-7000
+    
+    return {
+        MACHINE_ID_SALT: salt,
+        BROWSER_VERSION: browserVersion,
+        PLATFORM_NAME: platform,
+        ACCEPT_ENCODING: 'gzip, deflate, br, zstd',
+        ACCEPT_LANGUAGE: language,
+        ENABLE_RANDOM_DELAY: true,
+        MIN_REQUEST_INTERVAL: minInterval,
+        MAX_REQUEST_INTERVAL: maxInterval
+    };
+}
+
 async function addProvider(providerType) {
     const checkModelName = document.getElementById('newCheckModelName')?.value;
     const checkHealth = document.getElementById('newCheckHealth')?.value === 'true';
@@ -1220,6 +1272,10 @@ async function addProvider(providerType) {
             break;
         case 'claude-kiro-oauth':
             providerConfig.KIRO_OAUTH_CREDS_FILE_PATH = document.getElementById('newKiroOauthCredsFilePath')?.value || '';
+            // 🔥 自动生成指纹参数（防止被封的关键）
+            const fingerprint = generateFingerprint();
+            Object.assign(providerConfig, fingerprint);
+            console.log('[Add Provider] Auto-generated fingerprint:', fingerprint);
             break;
         case 'openai-qwen-oauth':
             providerConfig.QWEN_OAUTH_CREDS_FILE_PATH = document.getElementById('newQwenOauthCredsFilePath')?.value || '';

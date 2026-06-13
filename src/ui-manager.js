@@ -23,6 +23,58 @@ import {
 } from './provider-utils.js';
 import { formatKiroUsage, formatGeminiUsage, formatAntigravityUsage } from './usage-service.js';
 
+/**
+ * 生成随机的设备指纹配置
+ * 用于 Kiro OAuth 防止账号被封
+ */
+function generateFingerprint() {
+    // 生成随机盐值（30字符）
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let salt = 'auto-generated-';
+    for (let i = 0; i < 30; i++) {
+        salt += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    // 随机浏览器版本 (120-131)
+    const majorVersions = [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131];
+    const majorVersion = majorVersions[Math.floor(Math.random() * majorVersions.length)];
+    const minorVersion = Math.floor(Math.random() * 10);
+    const build = 6000 + Math.floor(Math.random() * 1000);
+    const patch = Math.floor(Math.random() * 300);
+    const browserVersion = `${majorVersion}.${minorVersion}.${build}.${patch}`;
+    
+    // 随机平台
+    const platforms = ['Windows', 'macOS', 'Linux'];
+    const platform = platforms[Math.floor(Math.random() * platforms.length)];
+    
+    // 随机语言偏好
+    const languages = [
+        'en-US,en;q=0.9',
+        'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+        'en-GB,en;q=0.9,en-US;q=0.8',
+        'en-US,en;q=0.9,ja;q=0.8',
+        'en-US,en;q=0.9,es;q=0.8',
+        'en-US,en;q=0.9,fr;q=0.8',
+        'en-US,en;q=0.9,de;q=0.8'
+    ];
+    const language = languages[Math.floor(Math.random() * languages.length)];
+    
+    // 随机请求间隔（2-5秒范围内）
+    const minInterval = 2000 + Math.floor(Math.random() * 1000); // 2000-3000
+    const maxInterval = 5000 + Math.floor(Math.random() * 2000); // 5000-7000
+    
+    return {
+        MACHINE_ID_SALT: salt,
+        BROWSER_VERSION: browserVersion,
+        PLATFORM_NAME: platform,
+        ACCEPT_ENCODING: 'gzip, deflate, br, zstd',
+        ACCEPT_LANGUAGE: language,
+        ENABLE_RANDOM_DELAY: true,
+        MIN_REQUEST_INTERVAL: minInterval,
+        MAX_REQUEST_INTERVAL: maxInterval
+    };
+}
+
 // Token存储到本地文件中
 const TOKEN_STORE_FILE = 'token-store.json';
 
@@ -902,6 +954,20 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
             providerConfig.usageCount = providerConfig.usageCount || 0;
             providerConfig.errorCount = providerConfig.errorCount || 0;
             providerConfig.lastErrorTime = providerConfig.lastErrorTime || null;
+
+            // 🔥 如果是 Kiro OAuth 且缺少指纹配置，记录警告（前端已经生成）
+            if (providerType === 'claude-kiro-oauth') {
+                if (!providerConfig.MACHINE_ID_SALT) {
+                    console.warn('[UI API] Warning: Kiro account added without MACHINE_ID_SALT. This may increase ban risk.');
+                } else {
+                    console.log('[UI API] Kiro account added with fingerprint:', {
+                        uuid: providerConfig.uuid,
+                        salt: providerConfig.MACHINE_ID_SALT?.substring(0, 20) + '...',
+                        browser: providerConfig.BROWSER_VERSION,
+                        platform: providerConfig.PLATFORM_NAME
+                    });
+                }
+            }
 
             const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'provider_pools.json';
             let providerPools = {};
@@ -1789,7 +1855,8 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                 credPathKey,
                 credPath: formatSystemPath(filePath),
                 defaultCheckModel,
-                needsProjectId: providerMapping.needsProjectId
+                needsProjectId: providerMapping.needsProjectId,
+                providerType: providerType  // 🔥 传递 providerType 以便自动生成指纹
             });
 
             providerPools[providerType].push(newProvider);
@@ -2077,6 +2144,9 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                 createdFiles.push(path.relative(process.cwd(), credFilePath));
 
                 // Pool 条目
+                // 🔥 自动生成指纹参数（防止被封的关键）
+                const fingerprint = generateFingerprint();
+                
                 poolEntries.push({
                     KIRO_OAUTH_CREDS_FILE_PATH: path.relative(process.cwd(), credFilePath).replace(/\\/g, '/'),
                     uuid: token.id || `kiro-${Date.now()}-${i}`,
@@ -2091,7 +2161,15 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                     lastErrorTime: null,
                     lastHealthCheckTime: null,
                     lastHealthCheckModel: null,
-                    lastErrorMessage: null
+                    lastErrorMessage: null,
+                    // 🔥 添加指纹配置
+                    ...fingerprint
+                });
+                
+                console.log(`[Kiro Import] Generated fingerprint for ${email}:`, {
+                    salt: fingerprint.MACHINE_ID_SALT.substring(0, 20) + '...',
+                    browser: fingerprint.BROWSER_VERSION,
+                    platform: fingerprint.PLATFORM_NAME
                 });
             }
 

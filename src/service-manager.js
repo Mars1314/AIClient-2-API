@@ -131,7 +131,8 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
                             credPathKey,
                             credPath: formatSystemPath(relativePath),
                             defaultCheckModel,
-                            needsProjectId
+                            needsProjectId,
+                            providerType: options.providerType  // 🔥 传递 providerType 以便自动生成指纹
                         });
                         
                         newProviders.push(newProvider);
