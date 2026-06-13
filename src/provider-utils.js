@@ -5,6 +5,7 @@
 
 import * as path from 'path';
 import { promises as fs } from 'fs';
+import crypto from 'crypto';
 
 /**
  * 提供商目录映射配置
@@ -289,46 +290,84 @@ export async function isValidOAuthCredentials(filePath) {
  * 用于 Kiro OAuth 防止账号被封
  */
 function generateFingerprint() {
-    // 生成随机盐值（30字符）
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let salt = 'auto-generated-';
-    for (let i = 0; i < 30; i++) {
-        salt += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    
-    // 随机浏览器版本 (120-131)
-    const majorVersions = [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131];
+    // 🔥 使用加密级随机生成器生成 salt（更强的唯一性）
+    // crypto 已在文件顶部导入，直接使用
+    const randomBytes = crypto.randomBytes(32);
+    const timestamp = Date.now().toString(36);
+    const salt = `auto-${timestamp}-${randomBytes.toString('hex')}`;
+
+    // 🔥 扩大浏览器版本池 (115-135，21个版本 vs 原来12个)
+    const majorVersions = [115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135];
     const majorVersion = majorVersions[Math.floor(Math.random() * majorVersions.length)];
     const minorVersion = Math.floor(Math.random() * 10);
-    const build = 6000 + Math.floor(Math.random() * 1000);
-    const patch = Math.floor(Math.random() * 300);
+    const build = 5500 + Math.floor(Math.random() * 1500); // 5500-6999 vs 原来6000-6999
+    const patch = Math.floor(Math.random() * 500); // 0-499 vs 原来0-299
     const browserVersion = `${majorVersion}.${minorVersion}.${build}.${patch}`;
-    
-    // 随机平台
-    const platforms = ['Windows', 'macOS', 'Linux'];
-    const platform = platforms[Math.floor(Math.random() * platforms.length)];
-    
-    // 随机语言偏好
+
+    // 🔥 增加平台信息细节（Windows 包含不同版本）
+    const platformOptions = [
+        { name: 'Windows', detail: '10.0.19044' },
+        { name: 'Windows', detail: '10.0.19045' },
+        { name: 'Windows', detail: '10.0.22000' },
+        { name: 'Windows', detail: '10.0.22621' },
+        { name: 'Windows', detail: '11.0.22000' },
+        { name: 'macOS', detail: '13.5' },
+        { name: 'macOS', detail: '14.0' },
+        { name: 'macOS', detail: '14.1' },
+        { name: 'macOS', detail: '14.2' },
+        { name: 'Linux', detail: 'x86_64' },
+        { name: 'Linux', detail: 'x86_64' }
+    ];
+    const platformInfo = platformOptions[Math.floor(Math.random() * platformOptions.length)];
+
+    // 🔥 大幅扩展语言偏好组合 (25种 vs 原来7种)
     const languages = [
         'en-US,en;q=0.9',
         'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+        'en-US,en;q=0.9,zh-CN;q=0.8',
         'en-GB,en;q=0.9,en-US;q=0.8',
+        'en-GB,en;q=0.9',
         'en-US,en;q=0.9,ja;q=0.8',
+        'en-US,en;q=0.9,ja;q=0.8,en-GB;q=0.7',
         'en-US,en;q=0.9,es;q=0.8',
+        'en-US,en;q=0.9,es;q=0.8,es-MX;q=0.7',
+        'en-US,en;q=0.9,es-ES;q=0.8,es;q=0.7',
         'en-US,en;q=0.9,fr;q=0.8',
-        'en-US,en;q=0.9,de;q=0.8'
+        'en-US,en;q=0.9,fr;q=0.8,fr-FR;q=0.7',
+        'en-US,en;q=0.9,de;q=0.8',
+        'en-US,en;q=0.9,de;q=0.8,de-DE;q=0.7',
+        'en-US,en;q=0.9,pt;q=0.8',
+        'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+        'en-US,en;q=0.9,ko;q=0.8',
+        'en-US,en;q=0.9,ru;q=0.8',
+        'en-US,en;q=0.9,it;q=0.8',
+        'en-US,en;q=0.9,nl;q=0.8',
+        'en-AU,en;q=0.9,en-US;q=0.8',
+        'en-CA,en;q=0.9,en-US;q=0.8',
+        'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7',
+        'en-US,en;q=0.9,ar;q=0.8',
+        'en-US,en;q=0.9,th;q=0.8'
     ];
     const language = languages[Math.floor(Math.random() * languages.length)];
-    
-    // 随机请求间隔（2-5秒范围内）
-    const minInterval = 2000 + Math.floor(Math.random() * 1000); // 2000-3000
-    const maxInterval = 5000 + Math.floor(Math.random() * 2000); // 5000-7000
-    
+
+    // 🔥 增加随机编码选项
+    const encodingOptions = [
+        'gzip, deflate, br, zstd',
+        'gzip, deflate, br',
+        'gzip, deflate',
+    ];
+    const acceptEncoding = encodingOptions[Math.floor(Math.random() * encodingOptions.length)];
+
+    // 🔥 随机请求间隔范围更大 (2-4s 和 5-10s，原来是2-3s和5-7s)
+    const minInterval = 2000 + Math.floor(Math.random() * 2000); // 2000-4000
+    const maxInterval = 5000 + Math.floor(Math.random() * 5000); // 5000-10000
+
     return {
         MACHINE_ID_SALT: salt,
         BROWSER_VERSION: browserVersion,
-        PLATFORM_NAME: platform,
-        ACCEPT_ENCODING: 'gzip, deflate, br, zstd',
+        PLATFORM_NAME: platformInfo.name,
+        PLATFORM_DETAIL: platformInfo.detail,
+        ACCEPT_ENCODING: acceptEncoding,
         ACCEPT_LANGUAGE: language,
         ENABLE_RANDOM_DELAY: true,
         MIN_REQUEST_INTERVAL: minInterval,

@@ -26,48 +26,87 @@ import { formatKiroUsage, formatGeminiUsage, formatAntigravityUsage } from './us
 /**
  * 生成随机的设备指纹配置
  * 用于 Kiro OAuth 防止账号被封
+ * 🔥 与 provider-utils.js 保持一致，增强随机性
  */
 function generateFingerprint() {
-    // 生成随机盐值（30字符）
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let salt = 'auto-generated-';
-    for (let i = 0; i < 30; i++) {
-        salt += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    
-    // 随机浏览器版本 (120-131)
-    const majorVersions = [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131];
+    // 🔥 使用加密级随机生成器生成 salt（更强的唯一性）
+    // crypto 已在文件顶部导入，直接使用
+    const randomBytes = crypto.randomBytes(32);
+    const timestamp = Date.now().toString(36);
+    const salt = `auto-${timestamp}-${randomBytes.toString('hex')}`;
+
+    // 🔥 扩大浏览器版本池 (115-135，21个版本 vs 原来12个)
+    const majorVersions = [115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135];
     const majorVersion = majorVersions[Math.floor(Math.random() * majorVersions.length)];
     const minorVersion = Math.floor(Math.random() * 10);
-    const build = 6000 + Math.floor(Math.random() * 1000);
-    const patch = Math.floor(Math.random() * 300);
+    const build = 5500 + Math.floor(Math.random() * 1500); // 5500-6999 vs 原来6000-6999
+    const patch = Math.floor(Math.random() * 500); // 0-499 vs 原来0-299
     const browserVersion = `${majorVersion}.${minorVersion}.${build}.${patch}`;
-    
-    // 随机平台
-    const platforms = ['Windows', 'macOS', 'Linux'];
-    const platform = platforms[Math.floor(Math.random() * platforms.length)];
-    
-    // 随机语言偏好
+
+    // 🔥 增加平台信息细节（Windows 包含不同版本）
+    const platformOptions = [
+        { name: 'Windows', detail: '10.0.19044' },
+        { name: 'Windows', detail: '10.0.19045' },
+        { name: 'Windows', detail: '10.0.22000' },
+        { name: 'Windows', detail: '10.0.22621' },
+        { name: 'Windows', detail: '11.0.22000' },
+        { name: 'macOS', detail: '13.5' },
+        { name: 'macOS', detail: '14.0' },
+        { name: 'macOS', detail: '14.1' },
+        { name: 'macOS', detail: '14.2' },
+        { name: 'Linux', detail: 'x86_64' },
+        { name: 'Linux', detail: 'x86_64' }
+    ];
+    const platformInfo = platformOptions[Math.floor(Math.random() * platformOptions.length)];
+
+    // 🔥 大幅扩展语言偏好组合 (25种 vs 原来7种)
     const languages = [
         'en-US,en;q=0.9',
         'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+        'en-US,en;q=0.9,zh-CN;q=0.8',
         'en-GB,en;q=0.9,en-US;q=0.8',
+        'en-GB,en;q=0.9',
         'en-US,en;q=0.9,ja;q=0.8',
+        'en-US,en;q=0.9,ja;q=0.8,en-GB;q=0.7',
         'en-US,en;q=0.9,es;q=0.8',
+        'en-US,en;q=0.9,es;q=0.8,es-MX;q=0.7',
+        'en-US,en;q=0.9,es-ES;q=0.8,es;q=0.7',
         'en-US,en;q=0.9,fr;q=0.8',
-        'en-US,en;q=0.9,de;q=0.8'
+        'en-US,en;q=0.9,fr;q=0.8,fr-FR;q=0.7',
+        'en-US,en;q=0.9,de;q=0.8',
+        'en-US,en;q=0.9,de;q=0.8,de-DE;q=0.7',
+        'en-US,en;q=0.9,pt;q=0.8',
+        'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+        'en-US,en;q=0.9,ko;q=0.8',
+        'en-US,en;q=0.9,ru;q=0.8',
+        'en-US,en;q=0.9,it;q=0.8',
+        'en-US,en;q=0.9,nl;q=0.8',
+        'en-AU,en;q=0.9,en-US;q=0.8',
+        'en-CA,en;q=0.9,en-US;q=0.8',
+        'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7',
+        'en-US,en;q=0.9,ar;q=0.8',
+        'en-US,en;q=0.9,th;q=0.8'
     ];
     const language = languages[Math.floor(Math.random() * languages.length)];
-    
-    // 随机请求间隔（2-5秒范围内）
-    const minInterval = 2000 + Math.floor(Math.random() * 1000); // 2000-3000
-    const maxInterval = 5000 + Math.floor(Math.random() * 2000); // 5000-7000
-    
+
+    // 🔥 增加随机编码选项
+    const encodingOptions = [
+        'gzip, deflate, br, zstd',
+        'gzip, deflate, br',
+        'gzip, deflate',
+    ];
+    const acceptEncoding = encodingOptions[Math.floor(Math.random() * encodingOptions.length)];
+
+    // 🔥 随机请求间隔范围更大 (2-4s 和 5-10s，原来是2-3s和5-7s)
+    const minInterval = 2000 + Math.floor(Math.random() * 2000); // 2000-4000
+    const maxInterval = 5000 + Math.floor(Math.random() * 5000); // 5000-10000
+
     return {
         MACHINE_ID_SALT: salt,
         BROWSER_VERSION: browserVersion,
-        PLATFORM_NAME: platform,
-        ACCEPT_ENCODING: 'gzip, deflate, br, zstd',
+        PLATFORM_NAME: platformInfo.name,
+        PLATFORM_DETAIL: platformInfo.detail,
+        ACCEPT_ENCODING: acceptEncoding,
         ACCEPT_LANGUAGE: language,
         ENABLE_RANDOM_DELAY: true,
         MIN_REQUEST_INTERVAL: minInterval,
@@ -564,8 +603,81 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                 
                 const targetFilePath = path.join(targetDir, req.file.filename);
                 await fs.rename(tempFilePath, targetFilePath);
-                
+
                 const relativePath = path.relative(process.cwd(), targetFilePath);
+
+                // 🔥 如果是 Kiro 文件上传，自动添加到账号池并生成指纹
+                let autoLinkedProvider = null;
+                if (provider === 'kiro') {
+                    try {
+                        const poolsFilePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'provider_pools.json';
+                        let providerPools = {};
+
+                        // 读取现有配置
+                        if (existsSync(poolsFilePath)) {
+                            try {
+                                const fileContent = readFileSync(poolsFilePath, 'utf8');
+                                providerPools = JSON.parse(fileContent);
+                            } catch (e) {
+                                console.warn('[UI API] Failed to read provider_pools.json:', e.message);
+                            }
+                        }
+
+                        // 确保 claude-kiro-oauth 数组存在
+                        if (!providerPools['claude-kiro-oauth']) {
+                            providerPools['claude-kiro-oauth'] = [];
+                        }
+
+                        // 检查是否已经关联
+                        const normalizedPath = relativePath.replace(/\\/g, '/');
+                        const isAlreadyLinked = providerPools['claude-kiro-oauth'].some(p => {
+                            const existingPath = p.KIRO_OAUTH_CREDS_FILE_PATH;
+                            if (!existingPath) return false;
+                            const normalized = existingPath.replace(/\\/g, '/');
+                            return normalized === normalizedPath ||
+                                   normalized === './' + normalizedPath ||
+                                   './' + normalized === normalizedPath;
+                        });
+
+                        if (!isAlreadyLinked) {
+                            // 自动创建账号配置并生成指纹
+                            const newProvider = createProviderConfig({
+                                credPathKey: 'KIRO_OAUTH_CREDS_FILE_PATH',
+                                credPath: formatSystemPath(relativePath),
+                                defaultCheckModel: 'claude-haiku-4-5',
+                                needsProjectId: false,
+                                providerType: 'claude-kiro-oauth'
+                            });
+
+                            providerPools['claude-kiro-oauth'].push(newProvider);
+                            writeFileSync(poolsFilePath, JSON.stringify(providerPools, null, 2), 'utf8');
+
+                            autoLinkedProvider = newProvider;
+                            console.log(`[UI API] Auto-linked Kiro file with fingerprint:`, {
+                                uuid: newProvider.uuid,
+                                salt: newProvider.MACHINE_ID_SALT?.substring(0, 20) + '...',
+                                browser: newProvider.BROWSER_VERSION,
+                                platform: newProvider.PLATFORM_NAME
+                            });
+
+                            // 更新 provider pool manager
+                            if (providerPoolManager) {
+                                providerPoolManager.providerPools = providerPools;
+                                providerPoolManager.initializeProviderStatus();
+                            }
+
+                            // 广播提供商更新事件
+                            broadcastEvent('provider_update', {
+                                action: 'add',
+                                providerType: 'claude-kiro-oauth',
+                                providerConfig: newProvider,
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    } catch (e) {
+                        console.warn('[UI API] Failed to auto-link Kiro file:', e.message);
+                    }
+                }
 
                 // 广播更新事件
                 broadcastEvent('config_update', {
@@ -583,7 +695,9 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
                     message: '文件上传成功',
                     filePath: relativePath,
                     originalName: req.file.originalname,
-                    provider: provider
+                    provider: provider,
+                    autoLinked: !!autoLinkedProvider,
+                    providerConfig: autoLinkedProvider
                 }));
 
             } catch (error) {
@@ -955,10 +1069,18 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
             providerConfig.errorCount = providerConfig.errorCount || 0;
             providerConfig.lastErrorTime = providerConfig.lastErrorTime || null;
 
-            // 🔥 如果是 Kiro OAuth 且缺少指纹配置，记录警告（前端已经生成）
+            // 🔥 如果是 Kiro OAuth 且缺少指纹配置，后端自动生成（兜底保护）
             if (providerType === 'claude-kiro-oauth') {
                 if (!providerConfig.MACHINE_ID_SALT) {
-                    console.warn('[UI API] Warning: Kiro account added without MACHINE_ID_SALT. This may increase ban risk.');
+                    console.warn('[UI API] Warning: Kiro account added without fingerprint. Auto-generating...');
+                    const fingerprint = generateFingerprint();
+                    Object.assign(providerConfig, fingerprint);
+                    console.log('[UI API] Auto-generated fingerprint for Kiro account:', {
+                        uuid: providerConfig.uuid,
+                        salt: fingerprint.MACHINE_ID_SALT.substring(0, 20) + '...',
+                        browser: fingerprint.BROWSER_VERSION,
+                        platform: fingerprint.PLATFORM_NAME
+                    });
                 } else {
                     console.log('[UI API] Kiro account added with fingerprint:', {
                         uuid: providerConfig.uuid,

@@ -372,21 +372,23 @@ export class KiroApiService {
     /**
      * 生成随机的浏览器版本号
      * 使用真实的Chrome版本号范围
+     * 🔥 扩大版本范围，增加随机性
      */
     _generateRandomBrowserVersion() {
-        // Chrome 版本范围：120-131（2024-2025的真实版本）
-        const majorVersions = [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131];
+        // 🔥 Chrome 版本范围：115-135（扩展到21个版本，原来12个）
+        const majorVersions = [115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135];
         const majorVersion = majorVersions[Math.floor(Math.random() * majorVersions.length)];
         const minorVersion = Math.floor(Math.random() * 10); // 0-9
-        const build = 6000 + Math.floor(Math.random() * 1000); // 6000-6999
-        const patch = Math.floor(Math.random() * 300); // 0-299
-        
+        const build = 5500 + Math.floor(Math.random() * 1500); // 🔥 5500-6999 (扩大范围)
+        const patch = Math.floor(Math.random() * 500); // 🔥 0-499 (扩大范围)
+
         return `${majorVersion}.0.${build}.${patch}`;
     }
 
     /**
      * 生成sec-ch-ua请求头
      * 模拟真实的浏览器品牌信息
+     * 🔥 增加更多变体，避免指纹重复
      */
     _generateSecChUaBrand(browserVersion) {
         const majorVersion = browserVersion.split('.')[0];
@@ -395,6 +397,14 @@ export class KiroApiService {
             `"Google Chrome";v="${majorVersion}", "Chromium";v="${majorVersion}", "Not=A?Brand";v="99"`,
             `"Not_A Brand";v="8", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`,
             `"Chromium";v="${majorVersion}", "Not)A;Brand";v="99", "Google Chrome";v="${majorVersion}"`,
+            `"Google Chrome";v="${majorVersion}", "Not-A.Brand";v="99", "Chromium";v="${majorVersion}"`,
+            `"Not/A)Brand";v="8", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`,
+            `"Chromium";v="${majorVersion}", "Not.A/Brand";v="24", "Google Chrome";v="${majorVersion}"`,
+            `"Not?A_Brand";v="8", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`,
+            `"Google Chrome";v="${majorVersion}", "Chromium";v="${majorVersion}", "Not;A=Brand";v="24"`,
+            `"Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}", "Not:A-Brand";v="99"`,
+            `"Not(A:Brand";v="24", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`,
+            `"Google Chrome";v="${majorVersion}", "Not A;Brand";v="99", "Chromium";v="${majorVersion}"`,
         ];
         return brands[Math.floor(Math.random() * brands.length)];
     }
@@ -402,40 +412,71 @@ export class KiroApiService {
     /**
      * 生成随机的Accept-Language请求头
      * 使用常见的语言偏好组合
+     * 🔥 扩展到25种组合，避免重复
      */
     _generateRandomAcceptLanguage() {
         const languages = [
             'en-US,en;q=0.9',
             'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'en-US,en;q=0.9,zh-CN;q=0.8',
             'en-GB,en;q=0.9,en-US;q=0.8',
+            'en-GB,en;q=0.9',
             'en-US,en;q=0.9,ja;q=0.8',
+            'en-US,en;q=0.9,ja;q=0.8,en-GB;q=0.7',
             'en-US,en;q=0.9,es;q=0.8',
+            'en-US,en;q=0.9,es;q=0.8,es-MX;q=0.7',
+            'en-US,en;q=0.9,es-ES;q=0.8,es;q=0.7',
             'en-US,en;q=0.9,fr;q=0.8',
+            'en-US,en;q=0.9,fr;q=0.8,fr-FR;q=0.7',
             'en-US,en;q=0.9,de;q=0.8',
+            'en-US,en;q=0.9,de;q=0.8,de-DE;q=0.7',
+            'en-US,en;q=0.9,pt;q=0.8',
+            'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+            'en-US,en;q=0.9,ko;q=0.8',
+            'en-US,en;q=0.9,ru;q=0.8',
+            'en-US,en;q=0.9,it;q=0.8',
+            'en-US,en;q=0.9,nl;q=0.8',
+            'en-AU,en;q=0.9,en-US;q=0.8',
+            'en-CA,en;q=0.9,en-US;q=0.8',
+            'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7',
+            'en-US,en;q=0.9,ar;q=0.8',
+            'en-US,en;q=0.9,th;q=0.8'
         ];
         return languages[Math.floor(Math.random() * languages.length)];
     }
 
     /**
      * 添加随机延迟，模拟人类操作
+     * 🔥 增加偶发的长间隔，避免均匀的时间分布模式
      */
     async addRandomDelay() {
         if (!this.randomDelayEnabled) return;
 
         const now = Date.now();
         const timeSinceLastRequest = now - this.lastRequestTime;
-        
+
+        // 🔥 8% 概率触发"长间隔"（模拟用户暂停、思考、切换任务等行为）
+        // 降低到 8%（原 10%）以减少对用户体验的影响
+        if (Math.random() < 0.08) {
+            const longDelay = 30000 + Math.random() * 60000; // 30-90 秒
+            console.log(`[Kiro] Simulating human pause (anti-detection): ${Math.round(longDelay / 1000)}s`);
+            await new Promise(resolve => setTimeout(resolve, longDelay));
+            this.lastRequestTime = Date.now();
+            this.requestCount++;
+            return;
+        }
+
         // 如果距离上次请求时间太短，添加延迟
         if (timeSinceLastRequest < KIRO_CONSTANTS.MIN_REQUEST_INTERVAL) {
             const baseDelay = KIRO_CONSTANTS.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
-            // 添加随机抖动 (0-2秒)
+            // 添加随机抖动
             const jitter = Math.random() * (KIRO_CONSTANTS.MAX_REQUEST_INTERVAL - KIRO_CONSTANTS.MIN_REQUEST_INTERVAL);
             const totalDelay = baseDelay + jitter;
-            
+
             console.debug(`[Kiro] Adding delay of ${Math.round(totalDelay)}ms to avoid rate limiting`);
             await new Promise(resolve => setTimeout(resolve, totalDelay));
         }
-        
+
         this.lastRequestTime = Date.now();
         this.requestCount++;
     }
