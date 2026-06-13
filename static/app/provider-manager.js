@@ -2,6 +2,7 @@
 
 import { providerStats, updateProviderStats } from './constants.js';
 import { showToast } from './utils.js';
+import { initCurrentProviderDisplay, stopCurrentProviderRefresh } from './current-provider-display.js';
 
 // 保存初始服务器时间和运行时间
 let initialServerTime = null;

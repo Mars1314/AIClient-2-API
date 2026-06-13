@@ -29,8 +29,8 @@ const KIRO_CONSTANTS = {
     ORIGIN_AI_EDITOR: 'AI_EDITOR',
     TOTAL_CONTEXT_TOKENS: 172500,
     // 添加更多请求间隔相关的常量
-    MIN_REQUEST_INTERVAL: 1000, // 最小请求间隔（毫秒）
-    MAX_REQUEST_INTERVAL: 3000, // 最大请求间隔（毫秒）
+    MIN_REQUEST_INTERVAL: 2000, // 最小请求间隔（毫秒）- 增加到2秒
+    MAX_REQUEST_INTERVAL: 5000, // 最大请求间隔（毫秒）- 增加到5秒
 };
 
 // 从 provider-models.js 获取支持的模型列表
@@ -370,6 +370,53 @@ export class KiroApiService {
     }
  
     /**
+     * 生成随机的浏览器版本号
+     * 使用真实的Chrome版本号范围
+     */
+    _generateRandomBrowserVersion() {
+        // Chrome 版本范围：120-131（2024-2025的真实版本）
+        const majorVersions = [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131];
+        const majorVersion = majorVersions[Math.floor(Math.random() * majorVersions.length)];
+        const minorVersion = Math.floor(Math.random() * 10); // 0-9
+        const build = 6000 + Math.floor(Math.random() * 1000); // 6000-6999
+        const patch = Math.floor(Math.random() * 300); // 0-299
+        
+        return `${majorVersion}.0.${build}.${patch}`;
+    }
+
+    /**
+     * 生成sec-ch-ua请求头
+     * 模拟真实的浏览器品牌信息
+     */
+    _generateSecChUaBrand(browserVersion) {
+        const majorVersion = browserVersion.split('.')[0];
+        const brands = [
+            `"Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}", "Not-A.Brand";v="99"`,
+            `"Google Chrome";v="${majorVersion}", "Chromium";v="${majorVersion}", "Not=A?Brand";v="99"`,
+            `"Not_A Brand";v="8", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`,
+            `"Chromium";v="${majorVersion}", "Not)A;Brand";v="99", "Google Chrome";v="${majorVersion}"`,
+        ];
+        return brands[Math.floor(Math.random() * brands.length)];
+    }
+
+    /**
+     * 生成随机的Accept-Language请求头
+     * 使用常见的语言偏好组合
+     */
+    _generateRandomAcceptLanguage() {
+        const languages = [
+            'en-US,en;q=0.9',
+            'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'en-GB,en;q=0.9,en-US;q=0.8',
+            'en-US,en;q=0.9,ja;q=0.8',
+            'en-US,en;q=0.9,es;q=0.8',
+            'en-US,en;q=0.9,fr;q=0.8',
+            'en-US,en;q=0.9,de;q=0.8',
+        ];
+        return languages[Math.floor(Math.random() * languages.length)];
+    }
+
+    /**
      * 添加随机延迟，模拟人类操作
      */
     async addRandomDelay() {
@@ -449,9 +496,13 @@ export class KiroApiService {
         const xAmzUserAgent = `aws-sdk-js/1.0.0 KiroIDE-${kiroVersion}-${machineId}`;
         const userAgent = `aws-sdk-js/1.0.0 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererruntime#1.0.0 m/E KiroIDE-${kiroVersion}-${machineId}`;
 
-        // **改进**：支持账号级别的浏览器特征配置
-        const browserVersion = this.config.BROWSER_VERSION || '120';
+        // **改进**：支持账号级别的浏览器特征配置，增加更多随机性
+        const browserVersion = this.config.BROWSER_VERSION || this._generateRandomBrowserVersion();
         const platformName = this.config.PLATFORM_NAME || (osPlatform === 'win32' ? 'Windows' : osPlatform === 'darwin' ? 'macOS' : 'Linux');
+        
+        // 生成随机的浏览器特征
+        const secChUaBrand = this._generateSecChUaBrand(browserVersion);
+        const acceptLanguage = this.config.ACCEPT_LANGUAGE || this._generateRandomAcceptLanguage();
         
         // 添加更多真实的浏览器/客户端特征
         const commonHeaders = {
@@ -462,12 +513,15 @@ export class KiroApiService {
             'x-amz-user-agent': xAmzUserAgent,
             'user-agent': userAgent,
             'Connection': 'close',
-            // 添加更多反检测请求头（支持自定义）
-            'Accept-Encoding': this.config.ACCEPT_ENCODING || 'gzip, deflate, br',
-            'Accept-Language': this.config.ACCEPT_LANGUAGE || 'en-US,en;q=0.9',
-            'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="${browserVersion}"`,
+            // 添加更多反检测请求头（增强随机性）
+            'Accept-Encoding': this.config.ACCEPT_ENCODING || 'gzip, deflate, br, zstd',
+            'Accept-Language': acceptLanguage,
+            'sec-ch-ua': secChUaBrand,
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': `"${platformName}"`,
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'none',
         };
 
         const axiosConfig = {
@@ -1497,7 +1551,12 @@ async initializeAuth(forceRefresh = false) {
                     return this.callApi(method, model, body, true, retryCount);
                 } catch (refreshError) {
                     console.error('[Kiro] Token refresh failed during 403 retry:', refreshError.message);
-                    throw refreshError;
+                    // 创建一个明确的403错误，确保被识别为认证失败
+                    const authError = new Error('Request failed with status code 403');
+                    authError.response = { status: 403, data: { message: 'Authentication failed' } };
+                    authError.status = 403;
+                    authError.code = 403;
+                    throw authError;
                 }
             }
             
@@ -1823,7 +1882,12 @@ async initializeAuth(forceRefresh = false) {
                     return;
                 } catch (refreshError) {
                     console.error('[Kiro] Token refresh failed during 403 retry:', refreshError.message);
-                    throw refreshError;
+                    // 创建一个明确的403错误，确保被识别为认证失败
+                    const authError = new Error('Request failed with status code 403');
+                    authError.response = { status: 403, data: { message: 'Authentication failed' } };
+                    authError.status = 403;
+                    authError.code = 403;
+                    throw authError;
                 }
             }
 
@@ -2410,7 +2474,12 @@ async initializeAuth(forceRefresh = false) {
                     return retryResponse.data;
                 } catch (refreshError) {
                     console.error('[Kiro] Token refresh failed during getUsageLimits retry:', refreshError.message);
-                    throw refreshError;
+                    // 创建一个明确的403错误，确保被识别为认证失败
+                    const authError = new Error('Request failed with status code 403');
+                    authError.response = { status: 403, data: { message: 'Authentication failed' } };
+                    authError.status = 403;
+                    authError.code = 403;
+                    throw authError;
                 }
             }
             console.error('[Kiro] Failed to fetch usage limits:', error.message);

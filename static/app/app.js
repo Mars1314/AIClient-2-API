@@ -63,6 +63,8 @@ import {
     reloadConfig
 } from './upload-config-manager.js';
 
+import './current-provider-display.js'; // 导入当前provider显示模块
+
 import {
     initUsageManager,
     refreshUsage

@@ -4366,3 +4366,197 @@ input:checked + .toggle-slider:before {
         padding: 0.5rem;
     }
 }
+
+
+/* ========================================
+   当前账号显示样式 - Current Provider Display
+   ======================================== */
+
+/* 当前账号标签 - 显示在modal标题栏 */
+.current-account-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.current-account-badge span {
+    margin-left: 12px;
+    padding: 6px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+    animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+    0%, 100% {
+        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+    }
+    50% {
+        box-shadow: 0 4px 16px rgba(102, 126, 234, 0.6);
+    }
+}
+
+/* 当前使用的provider高亮 */
+.provider-item-detail.current-active {
+    border: 2px solid #667eea !important;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3) !important;
+    background: linear-gradient(135deg, #f8f9ff 0%, #ffffff 100%) !important;
+}
+
+/* 当前使用标签 */
+.current-using-badge {
+    display: inline-flex;
+    align-items: center;
+}
+
+.current-using-badge span {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 10px;
+    box-shadow: 0 2px 6px rgba(102, 126, 234, 0.3);
+    animation: fade-in 0.5s ease;
+}
+
+@keyframes fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 指纹信息卡片 */
+.current-fingerprint-info {
+    margin: 16px 0;
+    padding: 16px;
+    background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    border-radius: 8px;
+    border-left: 4px solid #667eea;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    animation: slide-in 0.5s ease;
+}
+
+@keyframes slide-in {
+    from {
+        opacity: 0;
+        transform: translateX(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.current-fingerprint-info > div:first-child {
+    font-weight: 600;
+    color: #667eea;
+    margin-bottom: 12px;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.current-fingerprint-info > div:first-child i {
+    font-size: 16px;
+}
+
+.current-fingerprint-info > div:nth-child(2) {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    font-size: 12px;
+}
+
+.current-fingerprint-info > div:nth-child(2) > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.current-fingerprint-info > div:nth-child(2) > div span {
+    color: #6c757d;
+    font-weight: 500;
+}
+
+.current-fingerprint-info > div:nth-child(2) > div code {
+    background: rgba(102, 126, 234, 0.1);
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: #667eea;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    word-break: break-all;
+}
+
+.current-fingerprint-info > div:last-child {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(102, 126, 234, 0.2);
+    font-size: 11px;
+    color: #6c757d;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.current-fingerprint-info > div:last-child i {
+    color: #667eea;
+    font-size: 12px;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+    .current-fingerprint-info > div:nth-child(2) {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+    
+    .current-account-badge span {
+        font-size: 11px;
+        padding: 4px 12px;
+    }
+}
+
+/* 加载状态 */
+.models-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    color: #6c757d;
+    font-size: 13px;
+}
+
+.models-loading i {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Provider header top容器（用于容纳当前使用标签） */
+.provider-header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+}

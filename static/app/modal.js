@@ -42,12 +42,14 @@ function showProviderManagerModal(data) {
     modal.innerHTML = `
         <div class="provider-modal-content">
             <div class="provider-modal-header">
-                <h3><i class="fas fa-cogs"></i> 管理 ${providerType} 提供商配置</h3>
+                <h3 class="modal-title">
+                    <i class="fas fa-cogs"></i> 管理 ${providerType} 提供商配置
+                </h3>
                 <button class="modal-close" onclick="window.closeProviderModal(this)">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
-            <div class="provider-modal-body">
+            <div class="provider-modal-body modal-body">
                 <div class="provider-summary">
                     <div class="provider-summary-item">
                         <span class="label">总账户数:</span>
@@ -86,6 +88,13 @@ function showProviderManagerModal(data) {
     
     // 添加模态框事件监听
     addModalEventListeners(modal);
+    
+    // 初始化当前 provider 显示
+    if (window.initCurrentProviderDisplay) {
+        setTimeout(() => {
+            window.initCurrentProviderDisplay();
+        }, 500);
+    }
     
     // 先获取该提供商类型的模型列表（只调用一次API）
     const pageProviders = providers.slice(0, PROVIDERS_PER_PAGE);
@@ -337,6 +346,10 @@ function closeProviderModal(button) {
     if (modal) {
         if (modal.cleanup) {
             modal.cleanup();
+        }
+        // 停止当前 provider 刷新
+        if (window.stopCurrentProviderRefresh) {
+            window.stopCurrentProviderRefresh();
         }
         modal.remove();
     }

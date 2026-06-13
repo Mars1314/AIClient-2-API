@@ -764,6 +764,72 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return true;
     }
 
+    // Get current active provider for each provider type
+    if (method === 'GET' && pathParam === '/api/providers/current') {
+        const currentProviders = {};
+        
+        if (providerPoolManager && providerPoolManager.providerPools) {
+            // 遍历所有 provider type
+            for (const providerType in providerPoolManager.providerPools) {
+                const providers = providerPoolManager.providerStatus[providerType] || [];
+                
+                // 查找当前正在使用的 provider（第一个健康的或最近使用的）
+                const healthyProviders = providers.filter(p => p.config.isHealthy && !p.config.isDisabled);
+                const activeProvider = healthyProviders.length > 0 ? healthyProviders[0] : null;
+                
+                if (activeProvider) {
+                    currentProviders[providerType] = {
+                        uuid: activeProvider.config.uuid,
+                        isHealthy: activeProvider.config.isHealthy,
+                        isDisabled: activeProvider.config.isDisabled,
+                        usageCount: activeProvider.config.usageCount,
+                        errorCount: activeProvider.config.errorCount,
+                        lastUsed: activeProvider.config.lastUsed,
+                        lastErrorTime: activeProvider.config.lastErrorTime,
+                        lastErrorMessage: activeProvider.config.lastErrorMessage,
+                        // 指纹信息
+                        fingerprint: {
+                            MACHINE_ID_SALT: activeProvider.config.MACHINE_ID_SALT?.substring(0, 20) + '...' || 'default',
+                            BROWSER_VERSION: activeProvider.config.BROWSER_VERSION || 'auto',
+                            PLATFORM_NAME: activeProvider.config.PLATFORM_NAME || 'auto'
+                        }
+                    };
+                } else {
+                    // 没有健康的provider，查找最近使用的
+                    const sortedByLastUsed = providers
+                        .filter(p => p.config.lastUsed)
+                        .sort((a, b) => new Date(b.config.lastUsed) - new Date(a.config.lastUsed));
+                    
+                    if (sortedByLastUsed.length > 0) {
+                        const lastUsedProvider = sortedByLastUsed[0];
+                        currentProviders[providerType] = {
+                            uuid: lastUsedProvider.config.uuid,
+                            isHealthy: lastUsedProvider.config.isHealthy,
+                            isDisabled: lastUsedProvider.config.isDisabled,
+                            usageCount: lastUsedProvider.config.usageCount,
+                            errorCount: lastUsedProvider.config.errorCount,
+                            lastUsed: lastUsedProvider.config.lastUsed,
+                            status: 'last_used',
+                            fingerprint: {
+                                MACHINE_ID_SALT: lastUsedProvider.config.MACHINE_ID_SALT?.substring(0, 20) + '...' || 'default',
+                                BROWSER_VERSION: lastUsedProvider.config.BROWSER_VERSION || 'auto',
+                                PLATFORM_NAME: lastUsedProvider.config.PLATFORM_NAME || 'auto'
+                            }
+                        };
+                    }
+                }
+            }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            currentProviders,
+            timestamp: new Date().toISOString()
+        }));
+        return true;
+    }
+
     // Get specific provider type details
     const providerTypeMatch = pathParam.match(/^\/api\/providers\/([^\/]+)$/);
     if (method === 'GET' && providerTypeMatch) {

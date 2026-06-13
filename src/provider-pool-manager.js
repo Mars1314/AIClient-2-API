@@ -203,7 +203,7 @@ export class ProviderPoolManager {
 
     /**
      * Marks a provider as unhealthy (e.g., after an API error).
-     * **Requires 2 consecutive failures** before marking as unhealthy.
+     * **特殊处理**：403认证错误立即标记为不健康，其他错误需要2次连续失败。
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {string} [errorMessage] - Optional error message to store.
@@ -225,7 +225,23 @@ export class ProviderPoolManager {
                 provider.config.lastErrorMessage = errorMessage;
             }
 
-            // **关键改动**：需要达到 maxErrorCount（默认2次）才标记为不健康
+            // **特殊处理403认证错误**：立即标记为不健康，不需要等待多次失败
+            const is403Error = errorMessage && (
+                errorMessage.includes('403') || 
+                errorMessage.includes('status code 403') ||
+                errorMessage.includes('Authentication failed') ||
+                errorMessage.includes('Forbidden')
+            );
+
+            if (is403Error) {
+                const wasHealthy = provider.config.isHealthy;
+                provider.config.isHealthy = false;
+                this._log('error', `🚫 Provider marked as UNHEALTHY immediately due to 403 error: ${providerConfig.uuid} (${providerType}). Error: ${errorMessage}`);
+                this._debouncedSave(providerType);
+                return wasHealthy;
+            }
+
+            // **正常错误处理**：需要达到 maxErrorCount（默认2次）才标记为不健康
             if (provider.config.errorCount >= this.maxErrorCount) {
                 const wasHealthy = provider.config.isHealthy;
                 provider.config.isHealthy = false;
