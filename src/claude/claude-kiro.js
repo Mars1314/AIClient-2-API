@@ -28,6 +28,9 @@ const KIRO_CONSTANTS = {
     CHAT_TRIGGER_TYPE_MANUAL: 'MANUAL',
     ORIGIN_AI_EDITOR: 'AI_EDITOR',
     TOTAL_CONTEXT_TOKENS: 172500,
+    // 添加更多请求间隔相关的常量
+    MIN_REQUEST_INTERVAL: 1000, // 最小请求间隔（毫秒）
+    MAX_REQUEST_INTERVAL: 3000, // 最大请求间隔（毫秒）
 };
 
 // 从 provider-models.js 获取支持的模型列表
@@ -35,15 +38,18 @@ const KIRO_MODELS = getProviderModels('claude-kiro-oauth');
 
 // 完整的模型映射表
 const FULL_MODEL_MAPPING = {
+    "claude-opus-4-8":"claude-opus-4.8",
+    "claude-opus-4-7":"claude-opus-4.7",
     "claude-opus-4-6":"claude-opus-4.6",
     "claude-sonnet-4-6":"claude-sonnet-4.6",
     "claude-opus-4-5":"claude-opus-4.5",
     "claude-opus-4-5-20251101":"claude-opus-4.5",
     "claude-haiku-4-5":"claude-haiku-4.5",
-    "claude-sonnet-4-5": "CLAUDE_SONNET_4_5_20250929_V1_0",
-    "claude-sonnet-4-5-20250929": "CLAUDE_SONNET_4_5_20250929_V1_0",
+    "claude-sonnet-4-5": "claude-sonnet-4.5",
+    "claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
     "claude-sonnet-4-20250514": "CLAUDE_SONNET_4_20250514_V1_0",
-    "claude-3-7-sonnet-20250219": "CLAUDE_3_7_SONNET_20250219_V1_0"
+    "claude-3-7-sonnet-20250219": "CLAUDE_3_7_SONNET_20250219_V1_0",
+    "glm-5": "glm-5"
 };
 
 // 只保留 KIRO_MODELS 中存在的模型映射
@@ -92,12 +98,41 @@ function normalizeMachineId(machineId) {
 /**
  * 根据凭证信息生成唯一的 Machine ID
  * 优先级：uuid > profileArn > clientId > fallback
+ * 如果配置了 CUSTOM_MACHINE_ID，则使用自定义值
  * @param {Object} credentials - 凭证对象
+ * @param {Object} config - 配置对象
  * @returns {string} 64位十六进制的 machine_id
  */
-function generateMachineIdFromConfig(credentials) {
-    const uniqueKey = credentials.uuid || credentials.profileArn || credentials.clientId || "KIRO_DEFAULT_MACHINE";
-    return crypto.createHash('sha256').update(uniqueKey).digest('hex');
+function generateMachineIdFromConfig(credentials, config = {}) {
+    // 优先使用自定义 Machine ID（如果配置了）
+    if (config.CUSTOM_MACHINE_ID) {
+        const normalized = normalizeMachineId(config.CUSTOM_MACHINE_ID);
+        if (normalized) {
+            console.log('[Kiro] Using custom Machine ID from config');
+            return normalized;
+        }
+        console.warn('[Kiro] Invalid CUSTOM_MACHINE_ID format, falling back to auto-generation');
+    }
+
+    // 构建用于生成 Machine ID 的唯一键
+    let uniqueKey = credentials.uuid || credentials.profileArn || credentials.clientId;
+    
+    // 如果都没有，使用默认值加上一些随机性
+    if (!uniqueKey) {
+        // 使用主机名、用户名等系统信息作为种子
+        const hostname = os.hostname();
+        const username = os.userInfo().username;
+        const platform = os.platform();
+        const arch = os.arch();
+        uniqueKey = `KIRO_${hostname}_${username}_${platform}_${arch}`;
+        console.log('[Kiro] No unique key found in credentials, using system info for Machine ID generation');
+    }
+    
+    // 添加一个盐值以增加熵
+    const salt = config.MACHINE_ID_SALT || 'kiro-default-salt-2025';
+    const combinedKey = `${uniqueKey}-${salt}`;
+    
+    return crypto.createHash('sha256').update(combinedKey).digest('hex');
 }
 
 /**
@@ -308,15 +343,12 @@ export class KiroApiService {
         this.credsBase64 = config.KIRO_OAUTH_CREDS_BASE64;
         this.useSystemProxy = config?.USE_SYSTEM_PROXY_KIRO ?? false;
         console.log(`[Kiro] System proxy ${this.useSystemProxy ? 'enabled' : 'disabled'}`);
-        // this.accessToken = config.KIRO_ACCESS_TOKEN;
-        // this.refreshToken = config.KIRO_REFRESH_TOKEN;
-        // this.clientId = config.KIRO_CLIENT_ID;
-        // this.clientSecret = config.KIRO_CLIENT_SECRET;
-        // this.authMethod = KIRO_CONSTANTS.AUTH_METHOD_SOCIAL;
-        // this.refreshUrl = KIRO_CONSTANTS.REFRESH_URL;
-        // this.refreshIDCUrl = KIRO_CONSTANTS.REFRESH_IDC_URL;
-        // this.baseUrl = KIRO_CONSTANTS.BASE_URL;
-        // this.amazonQUrl = KIRO_CONSTANTS.AMAZON_Q_URL;
+        // 添加请求间隔控制
+        this.lastRequestTime = 0;
+        this.requestCount = 0;
+        this.sessionStartTime = Date.now();
+        // 添加随机延迟因子
+        this.randomDelayEnabled = config?.ENABLE_RANDOM_DELAY ?? true;
 
         // Add kiro-oauth-creds-base64 and kiro-oauth-creds-file to config
         if (config.KIRO_OAUTH_CREDS_BASE64) {
@@ -337,6 +369,40 @@ export class KiroApiService {
         this.axiosInstance = null; // Initialize later in async method
     }
  
+    /**
+     * 添加随机延迟，模拟人类操作
+     */
+    async addRandomDelay() {
+        if (!this.randomDelayEnabled) return;
+
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastRequestTime;
+        
+        // 如果距离上次请求时间太短，添加延迟
+        if (timeSinceLastRequest < KIRO_CONSTANTS.MIN_REQUEST_INTERVAL) {
+            const baseDelay = KIRO_CONSTANTS.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+            // 添加随机抖动 (0-2秒)
+            const jitter = Math.random() * (KIRO_CONSTANTS.MAX_REQUEST_INTERVAL - KIRO_CONSTANTS.MIN_REQUEST_INTERVAL);
+            const totalDelay = baseDelay + jitter;
+            
+            console.debug(`[Kiro] Adding delay of ${Math.round(totalDelay)}ms to avoid rate limiting`);
+            await new Promise(resolve => setTimeout(resolve, totalDelay));
+        }
+        
+        this.lastRequestTime = Date.now();
+        this.requestCount++;
+    }
+
+    /**
+     * 生成动态的 amz-sdk-invocation-id
+     * 使用时间戳和随机数生成更真实的 ID
+     */
+    generateInvocationId() {
+        const timestamp = Date.now().toString(36);
+        const random = Math.random().toString(36).substring(2, 15);
+        return `${timestamp}-${random}-${this.requestCount}`;
+    }
+
     async initialize() {
         if (this.isInitialized) return;
         console.log('[Kiro] Initializing Kiro API Service...');
@@ -347,12 +413,13 @@ export class KiroApiService {
             uuid: this.uuid,
             profileArn: this.profileArn,
             clientId: this.clientId
-        });
+        }, this.config);
         console.log(`[Kiro] Generated machineId: ${machineId.substring(0, 16)}...`);
 
         const kiroVersion = KIRO_CONSTANTS.KIRO_VERSION;
         // 动态获取系统信息
         const { osName, nodeVersion } = getSystemRuntimeInfo();
+        const osPlatform = os.platform(); // 获取平台信息用于浏览器特征头
 
         // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
         const httpAgent = new http.Agent({
@@ -372,19 +439,28 @@ export class KiroApiService {
         const xAmzUserAgent = `aws-sdk-js/1.0.0 KiroIDE-${kiroVersion}-${machineId}`;
         const userAgent = `aws-sdk-js/1.0.0 ua/2.1 os/${osName} lang/js md/nodejs#${nodeVersion} api/codewhispererruntime#1.0.0 m/E KiroIDE-${kiroVersion}-${machineId}`;
 
+        // 添加更多真实的浏览器/客户端特征
+        const commonHeaders = {
+            'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
+            'Accept': KIRO_CONSTANTS.ACCEPT_JSON,
+            'amz-sdk-request': 'attempt=1; max=1',
+            'x-amzn-kiro-agent-mode': 'vibe',
+            'x-amz-user-agent': xAmzUserAgent,
+            'user-agent': userAgent,
+            'Connection': 'close',
+            // 添加更多反检测请求头
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="120"`,
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': `"${osPlatform === 'win32' ? 'Windows' : osPlatform === 'darwin' ? 'macOS' : 'Linux'}"`,
+        };
+
         const axiosConfig = {
             timeout: KIRO_CONSTANTS.AXIOS_TIMEOUT,
             httpAgent,
             httpsAgent,
-            headers: {
-                'Content-Type': KIRO_CONSTANTS.CONTENT_TYPE_JSON,
-                'Accept': KIRO_CONSTANTS.ACCEPT_JSON,
-                'amz-sdk-request': 'attempt=1; max=1',
-                'x-amzn-kiro-agent-mode': 'vibe',
-                'x-amz-user-agent': xAmzUserAgent,
-                'user-agent': userAgent,
-                'Connection': 'close',
-            },
+            headers: commonHeaders,
         };
 
         // 根据 useSystemProxy 配置代理设置
@@ -1383,6 +1459,9 @@ async initializeAuth(forceRefresh = false) {
         const requestData = this.buildCodewhispererRequest(messages, model, body.tools, body.system);
 
         try {
+            // 添加随机延迟
+            await this.addRandomDelay();
+
             const token = this.accessToken; // Use the already initialized token
 
             // 当 model 以 amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
@@ -1391,7 +1470,7 @@ async initializeAuth(forceRefresh = false) {
 
             const headers = {
                 'Authorization': `Bearer ${token}`,
-                'amz-sdk-invocation-id': `${uuidv4()}`,
+                'amz-sdk-invocation-id': this.generateInvocationId(),
             };
 
             const response = await this.axiosInstance.post(requestUrl, requestData, { headers });
