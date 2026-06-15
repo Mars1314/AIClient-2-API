@@ -612,14 +612,54 @@ export class ProviderPoolManager {
 
             // 先尝试刷新 token，确保使用最新的凭据
             // 优先使用 forceRefreshToken（强制刷新），否则使用 refreshToken
+            // ⚠️ 关键修复：如果 token 刷新失败且是封禁/认证错误，立即返回不健康
             if (typeof serviceAdapter.forceRefreshToken === 'function') {
                 try {
                     this._log('debug', `Force refreshing token before health check for ${providerConfig.uuid}`);
                     await serviceAdapter.forceRefreshToken();
                     this._log('debug', `Token force refresh completed for ${providerConfig.uuid}`);
                 } catch (refreshError) {
-                    this._log('warn', `Token force refresh failed for ${providerConfig.uuid}: ${refreshError.message}`);
-                    // 刷新失败不阻止健康检查，继续尝试获取用量
+                    const errorMsg = refreshError.message || String(refreshError);
+                    this._log('warn', `Token force refresh failed for ${providerConfig.uuid}: ${errorMsg}`);
+
+                    // 检查是否为封禁/认证错误（参考 kiro-account-manager 逻辑）
+                    const isBannedError = errorMsg.includes('BANNED') ||
+                                         errorMsg.includes('TemporarilySuspended') ||
+                                         errorMsg.includes('suspended') ||
+                                         errorMsg.includes('Account suspended') ||
+                                         (errorMsg.includes('423') && errorMsg.includes('status code'));
+
+                    const isAuthError = errorMsg.includes('AUTH_ERROR') ||
+                                       errorMsg.includes('401') ||
+                                       errorMsg.includes('403') ||
+                                       errorMsg.includes('invalid') ||
+                                       errorMsg.includes('Authentication failed') ||
+                                       errorMsg.includes('Forbidden');
+
+                    if (isBannedError) {
+                        this._log('error', `🚫 Account is BANNED: ${providerConfig.uuid} - ${errorMsg}`);
+                        return {
+                            success: false,
+                            modelName: null,
+                            errorMessage: `账号已封禁: ${errorMsg}`,
+                            usageInfo: null,
+                            isBanned: true  // 标记为封禁
+                        };
+                    }
+
+                    if (isAuthError) {
+                        this._log('error', `🚫 Account authentication failed: ${providerConfig.uuid} - ${errorMsg}`);
+                        return {
+                            success: false,
+                            modelName: null,
+                            errorMessage: `账号认证失败: ${errorMsg}`,
+                            usageInfo: null,
+                            isAuthError: true  // 标记为认证失败
+                        };
+                    }
+
+                    // 其他错误：继续尝试获取用量（可能是网络问题）
+                    this._log('debug', `Token refresh failed but not a ban/auth error, continuing with old token`);
                 }
             } else if (typeof serviceAdapter.refreshToken === 'function') {
                 try {
@@ -627,8 +667,46 @@ export class ProviderPoolManager {
                     await serviceAdapter.refreshToken();
                     this._log('debug', `Token refresh completed for ${providerConfig.uuid}`);
                 } catch (refreshError) {
-                    this._log('warn', `Token refresh failed for ${providerConfig.uuid}: ${refreshError.message}`);
-                    // 刷新失败不阻止健康检查，继续尝试获取用量
+                    const errorMsg = refreshError.message || String(refreshError);
+                    this._log('warn', `Token refresh failed for ${providerConfig.uuid}: ${errorMsg}`);
+
+                    // 同样的封禁/认证错误检查
+                    const isBannedError = errorMsg.includes('BANNED') ||
+                                         errorMsg.includes('TemporarilySuspended') ||
+                                         errorMsg.includes('suspended') ||
+                                         errorMsg.includes('Account suspended') ||
+                                         (errorMsg.includes('423') && errorMsg.includes('status code'));
+
+                    const isAuthError = errorMsg.includes('AUTH_ERROR') ||
+                                       errorMsg.includes('401') ||
+                                       errorMsg.includes('403') ||
+                                       errorMsg.includes('invalid') ||
+                                       errorMsg.includes('Authentication failed') ||
+                                       errorMsg.includes('Forbidden');
+
+                    if (isBannedError) {
+                        this._log('error', `🚫 Account is BANNED: ${providerConfig.uuid} - ${errorMsg}`);
+                        return {
+                            success: false,
+                            modelName: null,
+                            errorMessage: `账号已封禁: ${errorMsg}`,
+                            usageInfo: null,
+                            isBanned: true
+                        };
+                    }
+
+                    if (isAuthError) {
+                        this._log('error', `🚫 Account authentication failed: ${providerConfig.uuid} - ${errorMsg}`);
+                        return {
+                            success: false,
+                            modelName: null,
+                            errorMessage: `账号认证失败: ${errorMsg}`,
+                            usageInfo: null,
+                            isAuthError: true
+                        };
+                    }
+
+                    this._log('debug', `Token refresh failed but not a ban/auth error, continuing with old token`);
                 }
             }
 

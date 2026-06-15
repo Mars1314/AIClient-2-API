@@ -886,11 +886,54 @@ async initializeAuth(forceRefresh = false) {
             }
         } catch (error) {
             console.error('[Kiro Auth] Token refresh failed:', error.message);
+
+            // 分析错误类型，识别封禁和认证错误
+            let errorType = 'UNKNOWN';
+            let errorDetails = error.message;
+
             if (error.response) {
-                console.error('[Kiro Auth] Response status:', error.response.status);
-                console.error('[Kiro Auth] Response data:', error.response.data);
+                const status = error.response.status;
+                const responseData = error.response.data;
+                console.error('[Kiro Auth] Response status:', status);
+                console.error('[Kiro Auth] Response data:', responseData);
+
+                // 检查是否为封禁错误（参考 kiro-account-manager）
+                // 423 状态码表示账号被暂停
+                if (status === 423) {
+                    errorType = 'BANNED';
+                    errorDetails = 'Account suspended (HTTP 423)';
+                }
+                // 403 错误 + 特定原因
+                else if (status === 403 && responseData) {
+                    const dataStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData);
+                    const dataLower = dataStr.toLowerCase();
+
+                    // 检查是否包含 "TemporarilySuspended" 或 "suspended"
+                    if (dataStr.includes('TemporarilySuspended') || dataLower.includes('suspended')) {
+                        errorType = 'BANNED';
+                        errorDetails = `Account suspended: ${dataStr}`;
+                    }
+                    // 其他 403 错误视为认证失败
+                    else {
+                        errorType = 'AUTH_ERROR';
+                        errorDetails = `Authentication failed (HTTP 403): ${dataStr}`;
+                    }
+                }
+                // 401 未授权
+                else if (status === 401) {
+                    errorType = 'AUTH_ERROR';
+                    errorDetails = `Invalid token (HTTP 401)`;
+                }
+                // 其他 4xx 错误
+                else if (status >= 400 && status < 500) {
+                    errorType = 'AUTH_ERROR';
+                    errorDetails = `HTTP ${status}: ${responseData ? JSON.stringify(responseData) : error.message}`;
+                }
             }
-            throw new Error(`Token refresh failed: ${error.message}`);
+
+            // 抛出包含错误类型的错误信息
+            const errorMessage = `${errorType}: ${errorDetails}`;
+            throw new Error(errorMessage);
         }
     }
 
@@ -2464,6 +2507,21 @@ async initializeAuth(forceRefresh = false) {
     }
 
     /**
+     * 强制刷新 Token（用于健康检查）
+     * 无论当前 token 是否过期，都强制刷新
+     * @returns {Promise<void>}
+     */
+    async forceRefreshToken() {
+        console.log('[Kiro] Force refreshing token for health check...');
+        if (!this.isInitialized) {
+            await this.initialize();
+        }
+        // 强制刷新 token
+        await this.initializeAuth(true);
+        console.log('[Kiro] Token force refresh completed');
+    }
+
+    /**
      * 获取用量限制信息
      * @returns {Promise<Object>} 用量限制信息
      */
@@ -2515,14 +2573,46 @@ async initializeAuth(forceRefresh = false) {
                     return retryResponse.data;
                 } catch (refreshError) {
                     console.error('[Kiro] Token refresh failed during getUsageLimits retry:', refreshError.message);
-                    // 创建一个明确的403错误，确保被识别为认证失败
-                    const authError = new Error('Request failed with status code 403');
+                    // 如果刷新错误已经包含 BANNED 或 AUTH_ERROR 标记，直接传播
+                    if (refreshError.message.includes('BANNED:') || refreshError.message.includes('AUTH_ERROR:')) {
+                        throw refreshError;
+                    }
+                    // 否则创建一个明确的403错误，确保被识别为认证失败
+                    const authError = new Error('AUTH_ERROR: Request failed with status code 403');
                     authError.response = { status: 403, data: { message: 'Authentication failed' } };
                     authError.status = 403;
                     authError.code = 403;
                     throw authError;
                 }
             }
+
+            // 分析其他类型的错误
+            if (error.response) {
+                const status = error.response.status;
+                const responseData = error.response.data;
+
+                // 423 表示账号被封禁
+                if (status === 423) {
+                    const bannedError = new Error('BANNED: Account suspended (HTTP 423)');
+                    bannedError.response = error.response;
+                    bannedError.status = status;
+                    throw bannedError;
+                }
+
+                // 检查响应中是否包含 suspended 关键字
+                if (responseData) {
+                    const dataStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData);
+                    const dataLower = dataStr.toLowerCase();
+
+                    if (dataStr.includes('TemporarilySuspended') || dataLower.includes('suspended')) {
+                        const bannedError = new Error(`BANNED: ${dataStr}`);
+                        bannedError.response = error.response;
+                        bannedError.status = status;
+                        throw bannedError;
+                    }
+                }
+            }
+
             console.error('[Kiro] Failed to fetch usage limits:', error.message);
             throw error;
         }
