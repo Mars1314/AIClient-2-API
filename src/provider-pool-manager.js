@@ -607,152 +607,141 @@ export class ProviderPoolManager {
             return null;
         }
 
+        // 设置总超时时间为 25 秒
+        const HEALTH_CHECK_TIMEOUT = 25000;
+
         try {
             this._log('debug', `Performing usage-based health check for ${providerConfig.uuid} (${providerType})`);
 
-            // 先尝试刷新 token，确保使用最新的凭据
-            // 优先使用 forceRefreshToken（强制刷新），否则使用 refreshToken
-            // ⚠️ 关键修复：如果 token 刷新失败且是封禁/认证错误，立即返回不健康
-            if (typeof serviceAdapter.forceRefreshToken === 'function') {
-                try {
-                    this._log('debug', `Force refreshing token before health check for ${providerConfig.uuid}`);
-                    await serviceAdapter.forceRefreshToken();
-                    this._log('debug', `Token force refresh completed for ${providerConfig.uuid}`);
-                } catch (refreshError) {
-                    const errorMsg = refreshError.message || String(refreshError);
-                    this._log('warn', `Token force refresh failed for ${providerConfig.uuid}: ${errorMsg}`);
+            // 创建超时 Promise
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => {
+                    reject(new Error('Health check timeout after 25 seconds'));
+                }, HEALTH_CHECK_TIMEOUT);
+            });
 
-                    // 检查是否为封禁/认证错误（参考 kiro-account-manager 逻辑）
-                    const isBannedError = errorMsg.includes('BANNED') ||
-                                         errorMsg.includes('TemporarilySuspended') ||
-                                         errorMsg.includes('suspended') ||
-                                         errorMsg.includes('Account suspended') ||
-                                         (errorMsg.includes('423') && errorMsg.includes('status code'));
+            // 创建健康检测 Promise
+            const healthCheckPromise = this._performHealthCheckLogic(
+                providerType,
+                serviceAdapter,
+                providerConfig
+            );
 
-                    const isAuthError = errorMsg.includes('AUTH_ERROR') ||
-                                       errorMsg.includes('401') ||
-                                       errorMsg.includes('403') ||
-                                       errorMsg.includes('invalid') ||
-                                       errorMsg.includes('Authentication failed') ||
-                                       errorMsg.includes('Forbidden');
+            // 竞速：哪个先完成用哪个
+            const result = await Promise.race([healthCheckPromise, timeoutPromise]);
+            return result;
 
-                    if (isBannedError) {
-                        this._log('error', `🚫 Account is BANNED: ${providerConfig.uuid} - ${errorMsg}`);
-                        return {
-                            success: false,
-                            modelName: null,
-                            errorMessage: `账号已封禁: ${errorMsg}`,
-                            usageInfo: null,
-                            isBanned: true  // 标记为封禁
-                        };
-                    }
-
-                    if (isAuthError) {
-                        this._log('error', `🚫 Account authentication failed: ${providerConfig.uuid} - ${errorMsg}`);
-                        return {
-                            success: false,
-                            modelName: null,
-                            errorMessage: `账号认证失败: ${errorMsg}`,
-                            usageInfo: null,
-                            isAuthError: true  // 标记为认证失败
-                        };
-                    }
-
-                    // 其他错误：继续尝试获取用量（可能是网络问题）
-                    this._log('debug', `Token refresh failed but not a ban/auth error, continuing with old token`);
-                }
-            } else if (typeof serviceAdapter.refreshToken === 'function') {
-                try {
-                    this._log('debug', `Refreshing token before health check for ${providerConfig.uuid}`);
-                    await serviceAdapter.refreshToken();
-                    this._log('debug', `Token refresh completed for ${providerConfig.uuid}`);
-                } catch (refreshError) {
-                    const errorMsg = refreshError.message || String(refreshError);
-                    this._log('warn', `Token refresh failed for ${providerConfig.uuid}: ${errorMsg}`);
-
-                    // 同样的封禁/认证错误检查
-                    const isBannedError = errorMsg.includes('BANNED') ||
-                                         errorMsg.includes('TemporarilySuspended') ||
-                                         errorMsg.includes('suspended') ||
-                                         errorMsg.includes('Account suspended') ||
-                                         (errorMsg.includes('423') && errorMsg.includes('status code'));
-
-                    const isAuthError = errorMsg.includes('AUTH_ERROR') ||
-                                       errorMsg.includes('401') ||
-                                       errorMsg.includes('403') ||
-                                       errorMsg.includes('invalid') ||
-                                       errorMsg.includes('Authentication failed') ||
-                                       errorMsg.includes('Forbidden');
-
-                    if (isBannedError) {
-                        this._log('error', `🚫 Account is BANNED: ${providerConfig.uuid} - ${errorMsg}`);
-                        return {
-                            success: false,
-                            modelName: null,
-                            errorMessage: `账号已封禁: ${errorMsg}`,
-                            usageInfo: null,
-                            isBanned: true
-                        };
-                    }
-
-                    if (isAuthError) {
-                        this._log('error', `🚫 Account authentication failed: ${providerConfig.uuid} - ${errorMsg}`);
-                        return {
-                            success: false,
-                            modelName: null,
-                            errorMessage: `账号认证失败: ${errorMsg}`,
-                            usageInfo: null,
-                            isAuthError: true
-                        };
-                    }
-
-                    this._log('debug', `Token refresh failed but not a ban/auth error, continuing with old token`);
-                }
-            }
-
-            const rawUsageData = await serviceAdapter.getUsageLimits();
-            
-            // 只支持 Kiro
-            if (providerType !== MODEL_PROVIDER.KIRO_API) {
-                return null;
-            }
-            
-            // 动态导入格式化函数，避免循环依赖
-            const { formatKiroUsage } = await import('./usage-service.js');
-            const formattedUsage = formatKiroUsage(rawUsageData);
-
-            if (!formattedUsage) {
-                return { 
-                    success: false, 
-                    modelName: null, 
-                    errorMessage: 'Failed to parse usage data',
+        } catch (error) {
+            if (error.message.includes('timeout')) {
+                this._log('error', `Health check timeout for ${providerConfig.uuid}: ${error.message}`);
+                return {
+                    success: false,
+                    modelName: null,
+                    errorMessage: '健康检测超时（25秒），可能账号存在问题',
                     usageInfo: null
                 };
             }
-
-            // 分析用量数据，判断是否健康
-            const healthAnalysis = this._analyzeUsageHealth(providerType, formattedUsage, providerConfig);
-            
-            // 更新 provider 的用量信息
-            const provider = this._findProvider(providerType, providerConfig.uuid);
-            if (provider) {
-                provider.config.usageInfo = healthAnalysis.usageInfo;
-                provider.config.lastHealthCheckTime = new Date().toISOString();
-            }
-
-            this._log('info', `Usage-based health check for ${providerConfig.uuid} (${providerType}): ${healthAnalysis.success ? 'Healthy' : 'Unhealthy'} - ${healthAnalysis.summary}`);
-            
-            return {
-                success: healthAnalysis.success,
-                modelName: null,
-                errorMessage: healthAnalysis.success ? null : healthAnalysis.errorMessage,
-                usageInfo: healthAnalysis.usageInfo
-            };
-        } catch (error) {
             this._log('warn', `Usage-based health check failed for ${providerConfig.uuid} (${providerType}): ${error.message}`);
             // 返回 null 表示用量查询失败，让调用者回退到传统方式
             return null;
         }
+    }
+
+    /**
+     * 执行健康检测的核心逻辑（从 _checkProviderHealthByUsage 中提取）
+     * @private
+     */
+    async _performHealthCheckLogic(providerType, serviceAdapter, providerConfig) {
+        // 先尝试刷新 token，确保使用最新的凭据
+        // 优先使用 forceRefreshToken（强制刷新），否则使用 refreshToken
+        // ⚠️ 关键修复：如果 token 刷新失败且是封禁/认证错误，立即返回不健康
+        if (typeof serviceAdapter.forceRefreshToken === 'function') {
+            try {
+                this._log('debug', `Force refreshing token before health check for ${providerConfig.uuid}`);
+                await serviceAdapter.forceRefreshToken();
+                this._log('debug', `Token force refresh completed for ${providerConfig.uuid}`);
+            } catch (refreshError) {
+                const errorMsg = refreshError.message || String(refreshError);
+                this._log('warn', `Token force refresh failed for ${providerConfig.uuid}: ${errorMsg}`);
+
+                // 检查是否为封禁/认证错误（参考 kiro-account-manager 逻辑）
+                const isBannedError = errorMsg.includes('BANNED') ||
+                                     errorMsg.includes('TemporarilySuspended') ||
+                                     errorMsg.includes('suspended') ||
+                                     errorMsg.includes('Account suspended') ||
+                                     (errorMsg.includes('423') && errorMsg.includes('status code'));
+
+                const isAuthError = errorMsg.includes('AUTH_ERROR') ||
+                                   errorMsg.includes('401') ||
+                                   errorMsg.includes('403') ||
+                                   errorMsg.includes('invalid') ||
+                                   errorMsg.includes('Authentication failed') ||
+                                   errorMsg.includes('Forbidden');
+
+                if (isBannedError) {
+                    this._log('error', `🚫 Account is BANNED: ${providerConfig.uuid} - ${errorMsg}`);
+                    return {
+                        success: false,
+                        modelName: null,
+                        errorMessage: `账号已封禁: ${errorMsg}`,
+                        usageInfo: null,
+                        isBanned: true  // 标记为封禁
+                    };
+                }
+
+                if (isAuthError) {
+                    this._log('error', `🚫 Account authentication failed: ${providerConfig.uuid} - ${errorMsg}`);
+                    return {
+                        success: false,
+                        modelName: null,
+                        errorMessage: `账号认证失败: ${errorMsg}`,
+                        usageInfo: null,
+                        isAuthError: true  // 标记为认证失败
+                    };
+                }
+
+                this._log('debug', `Token refresh failed but not a ban/auth error, continuing with old token`);
+            }
+        }
+
+        const rawUsageData = await serviceAdapter.getUsageLimits();
+
+        // 只支持 Kiro
+        if (providerType !== MODEL_PROVIDER.KIRO_API) {
+            return null;
+        }
+
+        // 动态导入格式化函数，避免循环依赖
+        const { formatKiroUsage } = await import('./usage-service.js');
+        const formattedUsage = formatKiroUsage(rawUsageData);
+
+        if (!formattedUsage) {
+            return {
+                success: false,
+                modelName: null,
+                errorMessage: 'Failed to parse usage data',
+                usageInfo: null
+            };
+        }
+
+        // 分析用量数据，判断是否健康
+        const healthAnalysis = this._analyzeUsageHealth(providerType, formattedUsage, providerConfig);
+
+        // 更新 provider 的用量信息
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (provider) {
+            provider.config.usageInfo = healthAnalysis.usageInfo;
+            provider.config.lastHealthCheckTime = new Date().toISOString();
+        }
+
+        this._log('info', `Usage-based health check for ${providerConfig.uuid} (${providerType}): ${healthAnalysis.success ? 'Healthy' : 'Unhealthy'} - ${healthAnalysis.summary}`);
+
+        return {
+            success: healthAnalysis.success,
+            modelName: null,
+            errorMessage: healthAnalysis.success ? null : healthAnalysis.errorMessage,
+            usageInfo: healthAnalysis.usageInfo
+        };
     }
 
     /**

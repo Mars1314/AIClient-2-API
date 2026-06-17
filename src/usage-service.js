@@ -87,21 +87,47 @@ export class UsageService {
     async getKiroUsage(uuid = null) {
         const providerKey = uuid ? MODEL_PROVIDER.KIRO_API + uuid : MODEL_PROVIDER.KIRO_API;
         const adapter = serviceInstances[providerKey];
-        
+
         if (!adapter) {
             throw new Error(`Kiro 服务实例未找到: ${providerKey}`);
         }
-        
+
+        // 🔥 关键改进：在获取用量前先强制刷新 token，确保获取最新的账号状态
+        try {
+            // 尝试调用 forceRefreshToken 方法
+            if (typeof adapter.forceRefreshToken === 'function') {
+                console.log(`[Usage] Force refreshing token for Kiro instance: ${uuid || 'default'}`);
+                await adapter.forceRefreshToken();
+                console.log(`[Usage] Token refreshed successfully for: ${uuid || 'default'}`);
+            } else if (adapter.kiroApiService && typeof adapter.kiroApiService.forceRefreshToken === 'function') {
+                console.log(`[Usage] Force refreshing token for Kiro instance: ${uuid || 'default'}`);
+                await adapter.kiroApiService.forceRefreshToken();
+                console.log(`[Usage] Token refreshed successfully for: ${uuid || 'default'}`);
+            } else {
+                console.warn(`[Usage] forceRefreshToken not available for: ${providerKey}`);
+            }
+        } catch (refreshError) {
+            // Token 刷新失败，记录错误但继续尝试获取用量
+            console.error(`[Usage] Token refresh failed for ${uuid || 'default'}: ${refreshError.message}`);
+
+            // 如果是封禁或认证错误，直接抛出，不再继续获取用量
+            const errorMsg = refreshError.message || String(refreshError);
+            if (errorMsg.includes('BANNED') || errorMsg.includes('AUTH_ERROR') ||
+                errorMsg.includes('403') || errorMsg.includes('401')) {
+                throw new Error(`账号状态异常: ${errorMsg}`);
+            }
+        }
+
         // 使用适配器的 getUsageLimits 方法
         if (typeof adapter.getUsageLimits === 'function') {
             return adapter.getUsageLimits();
         }
-        
+
         // 兼容直接访问 kiroApiService 的情况
         if (adapter.kiroApiService && typeof adapter.kiroApiService.getUsageLimits === 'function') {
             return adapter.kiroApiService.getUsageLimits();
         }
-        
+
         throw new Error(`Kiro 服务实例不支持用量查询: ${providerKey}`);
     }
 

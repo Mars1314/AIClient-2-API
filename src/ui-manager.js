@@ -1152,6 +1152,107 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         }
     }
 
+    // Batch delete all providers of a specific type (必须放在单个删除之前！)
+    const batchDeleteMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/batch-delete$/);
+    if (method === 'DELETE' && batchDeleteMatch) {
+        const providerType = decodeURIComponent(batchDeleteMatch[1]);
+
+        try {
+            const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'provider_pools.json';
+            let providerPools = {};
+
+            // Load existing pools
+            if (existsSync(filePath)) {
+                try {
+                    const fileContent = readFileSync(filePath, 'utf8');
+                    providerPools = JSON.parse(fileContent);
+                } catch (readError) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
+                    return true;
+                }
+            }
+
+            const providers = providerPools[providerType] || [];
+
+            if (providers.length === 0) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: 'No providers found for this type' } }));
+                return true;
+            }
+
+            console.log(`[UI API] Batch deleting ${providers.length} providers from ${providerType}`);
+
+            // 删除所有关联的凭据文件
+            const deletedCredFiles = [];
+            const credPathKeys = [
+                'KIRO_OAUTH_CREDS_FILE_PATH',
+                'GEMINI_OAUTH_CREDS_FILE_PATH',
+                'QWEN_OAUTH_CREDS_FILE_PATH',
+                'ANTIGRAVITY_OAUTH_CREDS_FILE_PATH'
+            ];
+
+            for (const provider of providers) {
+                for (const key of credPathKeys) {
+                    if (provider[key]) {
+                        const credFilePath = path.join(process.cwd(), provider[key]);
+                        try {
+                            if (existsSync(credFilePath)) {
+                                await fs.unlink(credFilePath);
+                                deletedCredFiles.push(provider[key]);
+                                console.log(`[UI API] Deleted credential file: ${credFilePath}`);
+                            }
+                        } catch (unlinkError) {
+                            console.warn(`[UI API] Failed to delete credential file ${credFilePath}:`, unlinkError.message);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            const deletedCount = providers.length;
+            const deletedProviders = [...providers];
+
+            // Remove the entire provider type
+            delete providerPools[providerType];
+
+            // Save to file
+            writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf8');
+            console.log(`[UI API] Batch deleted ${deletedCount} providers from ${providerType}`);
+
+            // Update provider pool manager if available
+            if (providerPoolManager) {
+                providerPoolManager.providerPools = providerPools;
+                providerPoolManager.initializeProviderStatus();
+            }
+
+            // 广播更新事件
+            broadcastEvent('config_update', {
+                action: 'batch_delete',
+                filePath: filePath,
+                providerType,
+                deletedCount,
+                deletedCredFiles,
+                timestamp: new Date().toISOString()
+            });
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                message: `成功删除 ${deletedCount} 个提供商配置`,
+                deletedCount,
+                deletedProviders,
+                deletedCredFiles
+            }));
+            return true;
+        } catch (error) {
+            console.error('[UI API] Batch delete error:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: error.message } }));
+            return true;
+        }
+    }
+
     // Update specific provider configuration
     const updateProviderMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)$/);
     if (method === 'PUT' && updateProviderMatch) {
@@ -2070,7 +2171,7 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         }
     }
 
-    // Get usage limits for a specific provider type
+    // Get usage limits for a specific provider type with batch support
     const usageProviderMatch = pathParam.match(/^\/api\/usage\/([^\/]+)$/);
     if (method === 'GET' && usageProviderMatch) {
         const providerType = decodeURIComponent(usageProviderMatch[1]);
@@ -2078,26 +2179,58 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
             // 解析查询参数，检查是否需要强制刷新
             const url = new URL(req.url, `http://${req.headers.host}`);
             const refresh = url.searchParams.get('refresh') === 'true';
-            
+            const force = url.searchParams.get('force') === 'true';
+            const batchIndex = parseInt(url.searchParams.get('batch') || '0');
+            const batchSize = parseInt(url.searchParams.get('batchSize') || '0');
+
             let usageResults;
-            
-            if (!refresh) {
-                // 优先读取缓存
-                const cachedData = await readProviderUsageCache(providerType);
-                if (cachedData) {
-                    console.log(`[Usage API] Returning cached usage data for ${providerType}`);
-                    usageResults = cachedData;
+
+            // 如果指定了批次参数，进行分批查询
+            if (batchSize > 0) {
+                console.log(`[Usage API] Fetching batch ${batchIndex} (size: ${batchSize}) for ${providerType}, force=${force}`);
+                usageResults = await getProviderTypeUsageBatch(providerType, currentConfig, providerPoolManager, force, batchIndex, batchSize);
+            } else {
+                // 原有逻辑：一次性查询所有
+                if (!refresh) {
+                    // 优先读取缓存
+                    const cachedData = await readProviderUsageCache(providerType);
+                    if (cachedData) {
+                        console.log(`[Usage API] Found cached usage data for ${providerType}`);
+
+                        // 获取当前实际存在的 provider UUID 列表
+                        let currentProviderUUIDs = new Set();
+                        if (providerPoolManager && providerPoolManager.providerPools && providerPoolManager.providerPools[providerType]) {
+                            providerPoolManager.providerPools[providerType].forEach(p => currentProviderUUIDs.add(p.uuid));
+                        } else if (currentConfig.providerPools && currentConfig.providerPools[providerType]) {
+                            currentConfig.providerPools[providerType].forEach(p => currentProviderUUIDs.add(p.uuid));
+                        }
+
+                        // 过滤缓存数据，只保留当前配置中存在的账号
+                        if (cachedData.instances && Array.isArray(cachedData.instances)) {
+                            const originalCount = cachedData.instances.length;
+                            cachedData.instances = cachedData.instances.filter(instance =>
+                                currentProviderUUIDs.has(instance.uuid)
+                            );
+                            const filteredCount = cachedData.instances.length;
+
+                            if (originalCount !== filteredCount) {
+                                console.log(`[Usage API] Filtered cached data: ${originalCount} -> ${filteredCount} (removed ${originalCount - filteredCount} deleted accounts)`);
+                            }
+                        }
+
+                        usageResults = cachedData;
+                    }
+                }
+
+                if (!usageResults) {
+                    // 缓存不存在或需要刷新，重新查询
+                    console.log(`[Usage API] Fetching fresh usage data for ${providerType}, force=${force}`);
+                    usageResults = await getProviderTypeUsage(providerType, currentConfig, providerPoolManager, force);
+                    // 更新缓存
+                    await updateProviderUsageCache(providerType, usageResults);
                 }
             }
-            
-            if (!usageResults) {
-                // 缓存不存在或需要刷新，重新查询
-                console.log(`[Usage API] Fetching fresh usage data for ${providerType}`);
-                usageResults = await getProviderTypeUsage(providerType, currentConfig, providerPoolManager);
-                // 更新缓存
-                await updateProviderUsageCache(providerType, usageResults);
-            }
-            
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(usageResults));
             return true;
@@ -2766,7 +2899,84 @@ async function getAllProvidersUsage(currentConfig, providerPoolManager) {
  * @param {Object} providerPoolManager - 提供商池管理器
  * @returns {Promise<Object>} 提供商用量信息
  */
-async function getProviderTypeUsage(providerType, currentConfig, providerPoolManager) {
+/**
+ * 分批查询提供商类型的用量（用于前端逐批渲染）
+ * @param {string} providerType - 提供商类型
+ * @param {Object} currentConfig - 当前配置
+ * @param {Object} providerPoolManager - 提供商池管理器
+ * @param {boolean} force - 是否强制刷新
+ * @param {number} batchIndex - 批次索引（从0开始）
+ * @param {number} batchSize - 每批数量
+ * @returns {Promise<Object>} 批次查询结果
+ */
+async function getProviderTypeUsageBatch(providerType, currentConfig, providerPoolManager, force, batchIndex, batchSize) {
+    // 获取提供商池中的所有实例
+    let providers = [];
+    if (providerPoolManager && providerPoolManager.providerPools && providerPoolManager.providerPools[providerType]) {
+        providers = providerPoolManager.providerPools[providerType];
+    } else if (currentConfig.providerPools && currentConfig.providerPools[providerType]) {
+        providers = currentConfig.providerPools[providerType];
+    }
+
+    const totalCount = providers.length;
+    const totalBatches = Math.ceil(totalCount / batchSize);
+    const startIndex = batchIndex * batchSize;
+    const endIndex = Math.min(startIndex + batchSize, totalCount);
+    const batch = providers.slice(startIndex, endIndex);
+
+    console.log(`[Usage API] 批次查询 ${batchIndex + 1}/${totalBatches}，账号范围: ${startIndex + 1}-${endIndex}/${totalCount}`);
+
+    const result = {
+        providerType,
+        instances: [],
+        totalCount,
+        currentBatch: batchIndex,
+        totalBatches,
+        batchSize: batch.length,
+        successCount: 0,
+        errorCount: 0
+    };
+
+    if (batch.length === 0) {
+        return result;
+    }
+
+    // 并发查询当前批次（批次内并发）
+    const batchPromises = batch.map(provider =>
+        fetchSingleProviderUsage(provider, providerType, force).catch(error => {
+            console.error(`[Usage API] 查询 ${provider.uuid} 失败:`, error.message);
+            return {
+                uuid: provider.uuid || 'unknown',
+                name: getProviderDisplayName(provider, providerType),
+                isHealthy: provider.isHealthy !== false,
+                isDisabled: provider.isDisabled === true,
+                success: false,
+                usage: null,
+                error: error.message
+            };
+        })
+    );
+
+    const batchResults = await Promise.all(batchPromises);
+
+    // 收集结果
+    for (const instanceResult of batchResults) {
+        if (instanceResult.success) {
+            result.successCount++;
+        } else {
+            result.errorCount++;
+        }
+        result.instances.push(instanceResult);
+    }
+
+    console.log(`[Usage API] 批次 ${batchIndex + 1}/${totalBatches} 完成，成功: ${result.successCount}/${batch.length}`);
+    return result;
+}
+
+/**
+ * 查询提供商类型的用量（全量查询，分批并发）
+ */
+async function getProviderTypeUsage(providerType, currentConfig, providerPoolManager, force = false) {
     const result = {
         providerType,
         instances: [],
@@ -2785,60 +2995,131 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
 
     result.totalCount = providers.length;
 
-    // 遍历所有提供商实例获取用量
-    for (const provider of providers) {
-        const providerKey = providerType + (provider.uuid || '');
-        let adapter = serviceInstances[providerKey];
-        
-        const instanceResult = {
-            uuid: provider.uuid || 'unknown',
-            name: getProviderDisplayName(provider, providerType),
-            isHealthy: provider.isHealthy !== false,
-            isDisabled: provider.isDisabled === true,
-            success: false,
-            usage: null,
-            error: null
-        };
-
-        // 首先检查是否已禁用，已禁用的提供商跳过初始化
-        if (provider.isDisabled) {
-            instanceResult.error = '提供商已禁用';
-            result.errorCount++;
-        } else if (!adapter) {
-            // 服务实例未初始化，尝试自动初始化
-            try {
-                console.log(`[Usage API] Auto-initializing service adapter for ${providerType}: ${provider.uuid}`);
-                // 构建配置对象
-                const serviceConfig = {
-                    ...CONFIG,
-                    ...provider,
-                    MODEL_PROVIDER: providerType
-                };
-                adapter = getServiceAdapter(serviceConfig);
-            } catch (initError) {
-                console.error(`[Usage API] Failed to initialize adapter for ${providerType}: ${provider.uuid}:`, initError.message);
-                instanceResult.error = `服务实例初始化失败: ${initError.message}`;
-                result.errorCount++;
-            }
-        }
-        
-        // 如果适配器存在（包括刚初始化的），且没有错误，尝试获取用量
-        if (adapter && !instanceResult.error) {
-            try {
-                const usage = await getAdapterUsage(adapter, providerType);
-                instanceResult.success = true;
-                instanceResult.usage = usage;
-                result.successCount++;
-            } catch (error) {
-                instanceResult.error = error.message;
-                result.errorCount++;
-            }
-        }
-
-        result.instances.push(instanceResult);
+    if (providers.length === 0) {
+        return result;
     }
 
+    console.log(`[Usage API] 开始查询 ${providerType}，共 ${providers.length} 个账号，分批并发查询（每批3个）`);
+
+    // 分批并发查询，每批3个
+    const BATCH_SIZE = 3;
+    for (let i = 0; i < providers.length; i += BATCH_SIZE) {
+        const batch = providers.slice(i, i + BATCH_SIZE);
+        const batchIndex = Math.floor(i / BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(providers.length / BATCH_SIZE);
+
+        console.log(`[Usage API] 处理批次 ${batchIndex}/${totalBatches}，包含 ${batch.length} 个账号`);
+
+        // 并发查询当前批次
+        const batchPromises = batch.map(provider =>
+            fetchSingleProviderUsage(provider, providerType, force).catch(error => {
+                console.error(`[Usage API] 查询 ${provider.uuid} 失败:`, error.message);
+                return {
+                    uuid: provider.uuid || 'unknown',
+                    name: getProviderDisplayName(provider, providerType),
+                    isHealthy: provider.isHealthy !== false,
+                    isDisabled: provider.isDisabled === true,
+                    success: false,
+                    usage: null,
+                    error: error.message
+                };
+            })
+        );
+
+        // 等待当前批次完成
+        const batchResults = await Promise.all(batchPromises);
+
+        // 收集结果
+        for (const instanceResult of batchResults) {
+            if (instanceResult.success) {
+                result.successCount++;
+            } else {
+                result.errorCount++;
+            }
+            result.instances.push(instanceResult);
+        }
+
+        console.log(`[Usage API] 批次 ${batchIndex}/${totalBatches} 完成，成功: ${batchResults.filter(r => r.success).length}/${batch.length}`);
+    }
+
+    console.log(`[Usage API] 查询完成，总计: ${result.totalCount}，成功: ${result.successCount}，失败: ${result.errorCount}`);
     return result;
+}
+
+/**
+ * 查询单个提供商实例的用量
+ * @param {Object} provider - 提供商配置
+ * @param {string} providerType - 提供商类型
+ * @param {boolean} force - 是否强制刷新
+ * @returns {Promise<Object>} 实例结果
+ */
+async function fetchSingleProviderUsage(provider, providerType, force) {
+    const providerKey = providerType + (provider.uuid || '');
+    let adapter = serviceInstances[providerKey];
+
+    const instanceResult = {
+        uuid: provider.uuid || 'unknown',
+        name: getProviderDisplayName(provider, providerType),
+        isHealthy: provider.isHealthy !== false,
+        isDisabled: provider.isDisabled === true,
+        success: false,
+        usage: null,
+        error: null
+    };
+
+    // 首先检查是否已禁用，已禁用的提供商跳过初始化
+    if (provider.isDisabled) {
+        instanceResult.error = '提供商已禁用';
+        return instanceResult;
+    }
+
+    // 如果适配器不存在，尝试自动初始化
+    if (!adapter) {
+        try {
+            console.log(`[Usage API] Auto-initializing service adapter for ${providerType}: ${provider.uuid}`);
+            // 构建配置对象
+            const serviceConfig = {
+                ...CONFIG,
+                ...provider,
+                MODEL_PROVIDER: providerType
+            };
+            adapter = getServiceAdapter(serviceConfig);
+        } catch (initError) {
+            console.error(`[Usage API] Failed to initialize adapter for ${providerType}: ${provider.uuid}:`, initError.message);
+            instanceResult.error = `服务实例初始化失败: ${initError.message}`;
+            return instanceResult;
+        }
+    }
+
+    // 如果适配器存在，尝试获取用量
+    if (adapter) {
+        // 如果 force=true，先强制刷新 token（仅针对 Kiro）
+        if (force && providerType === 'claude-kiro-oauth') {
+            try {
+                if (typeof adapter.forceRefreshToken === 'function') {
+                    console.log(`[Usage API] Force refreshing token for ${provider.uuid || 'default'}`);
+                    await adapter.forceRefreshToken();
+                } else if (adapter.kiroApiService && typeof adapter.kiroApiService.forceRefreshToken === 'function') {
+                    console.log(`[Usage API] Force refreshing token for ${provider.uuid || 'default'}`);
+                    await adapter.kiroApiService.forceRefreshToken();
+                }
+            } catch (refreshError) {
+                console.error(`[Usage API] Token refresh failed for ${provider.uuid || 'default'}:`, refreshError.message);
+                // 如果是封禁或认证错误，直接抛出
+                const errorMsg = refreshError.message || String(refreshError);
+                if (errorMsg.includes('BANNED') || errorMsg.includes('AUTH_ERROR') ||
+                    errorMsg.includes('403') || errorMsg.includes('401')) {
+                    throw new Error(`账号状态异常: ${errorMsg}`);
+                }
+            }
+        }
+
+        const usage = await getAdapterUsage(adapter, providerType);
+        instanceResult.success = true;
+        instanceResult.usage = usage;
+    }
+
+    return instanceResult;
 }
 
 /**

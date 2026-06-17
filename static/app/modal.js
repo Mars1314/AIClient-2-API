@@ -9,6 +9,8 @@ let currentPage = 1;
 let currentProviders = [];
 let currentProviderType = '';
 let cachedModels = []; // 缓存模型列表
+let filteredProviders = []; // 搜索过滤后的提供商列表
+let selectedProviderUUIDs = new Set(); // 选中的提供商 UUID 集合
 
 /**
  * 显示提供商管理模态框
@@ -16,13 +18,15 @@ let cachedModels = []; // 缓存模型列表
  */
 function showProviderManagerModal(data) {
     const { providerType, providers, totalCount, healthyCount } = data;
-    
+
     // 保存当前数据用于分页
     currentProviders = providers;
     currentProviderType = providerType;
     currentPage = 1;
     cachedModels = [];
-    
+    filteredProviders = providers; // 初始化为全部提供商
+    selectedProviderUUIDs.clear(); // 清空选中状态
+
     // 移除已存在的模态框
     const existingModal = document.querySelector('.provider-modal');
     if (existingModal) {
@@ -32,9 +36,9 @@ function showProviderManagerModal(data) {
         }
         existingModal.remove();
     }
-    
-    const totalPages = Math.ceil(providers.length / PROVIDERS_PER_PAGE);
-    
+
+    const totalPages = Math.ceil(filteredProviders.length / PROVIDERS_PER_PAGE);
+
     // 创建模态框
     const modal = document.createElement('div');
     modal.className = 'provider-modal';
@@ -69,16 +73,49 @@ function showProviderManagerModal(data) {
                         <button class="btn btn-info" onclick="window.performHealthCheck('${providerType}')" title="对所有节点执行健康检测">
                             <i class="fas fa-stethoscope"></i> 健康检测
                         </button>
+                        <button class="btn btn-danger" onclick="window.batchDeleteAllProviders('${providerType}')" title="一键删除所有配置和凭据文件">
+                            <i class="fas fa-trash-alt"></i> 一键删除所有
+                        </button>
                     </div>
                 </div>
-                
-                ${totalPages > 1 ? renderPagination(1, totalPages, providers.length) : ''}
-                
-                <div class="provider-list" id="providerList">
-                    ${renderProviderListPaginated(providers, 1)}
+
+                <!-- 搜索和批量操作区域 -->
+                <div class="provider-search-section">
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input type="text"
+                               id="providerSearchInput"
+                               placeholder="搜索账号 UUID 或备注..."
+                               onkeyup="window.handleProviderSearch(this.value)">
+                        <button class="clear-search-btn" onclick="window.clearSearch()" title="清除搜索">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    <div class="batch-actions">
+                        <label class="select-all-checkbox">
+                            <input type="checkbox"
+                                   id="selectAllCheckbox"
+                                   onchange="window.toggleSelectAll(this.checked)">
+                            <span>全选</span>
+                        </label>
+                        <span class="selected-count" id="selectedCount">已选中 0 个</span>
+                        <button class="btn btn-danger btn-sm"
+                                id="batchDeleteBtn"
+                                onclick="window.batchDeleteSelected()"
+                                disabled
+                                title="删除选中的提供商">
+                            <i class="fas fa-trash"></i> 删除选中
+                        </button>
+                    </div>
                 </div>
-                
-                ${totalPages > 1 ? renderPagination(1, totalPages, providers.length, 'bottom') : ''}
+
+                ${totalPages > 1 ? renderPagination(1, totalPages, filteredProviders.length) : ''}
+
+                <div class="provider-list" id="providerList">
+                    ${renderProviderListPaginated(filteredProviders, 1)}
+                </div>
+
+                ${totalPages > 1 ? renderPagination(1, totalPages, filteredProviders.length, 'bottom') : ''}
             </div>
         </div>
     `;
@@ -421,8 +458,15 @@ function renderProviderList(providers) {
         
         return `
             <div class="provider-item-detail ${healthClass} ${disabledClass}" data-uuid="${provider.uuid}">
-                <div class="provider-item-header" onclick="window.toggleProviderDetails('${provider.uuid}')">
-                    <div class="provider-info">
+                <div class="provider-item-header">
+                    <div class="provider-checkbox-container">
+                        <input type="checkbox"
+                               class="provider-checkbox"
+                               data-uuid="${provider.uuid}"
+                               onchange="window.handleProviderCheckboxChange('${provider.uuid}', this.checked)"
+                               ${selectedProviderUUIDs.has(provider.uuid) ? 'checked' : ''}>
+                    </div>
+                    <div class="provider-info" onclick="window.toggleProviderDetails('${provider.uuid}')">
                         <div class="provider-name">${provider._comment || provider.uuid}</div>
                         <div class="provider-meta">
                             <span class="health-status">
@@ -1419,28 +1463,130 @@ async function performHealthCheck(providerType) {
 }
 
 /**
+ * 批量删除所有提供商配置
+ * @param {string} providerType - 提供商类型
+ */
+async function batchDeleteAllProviders(providerType) {
+    console.log('[BatchDelete] 开始批量删除流程, providerType:', providerType);
+
+    const modal = document.querySelector('.provider-modal');
+    if (!modal) {
+        console.error('[BatchDelete] 找不到 modal 元素');
+        return;
+    }
+
+    const providers = currentProviders || [];
+    console.log('[BatchDelete] 当前提供商数量:', providers.length);
+
+    if (providers.length === 0) {
+        showToast('没有可删除的配置', 'info');
+        return;
+    }
+
+    const confirmMessage = `⚠️ 危险操作：确定要删除所有 ${providerType} 的配置吗？\n\n` +
+                          `即将删除：\n` +
+                          `- ${providers.length} 个提供商配置\n` +
+                          `- 所有关联的凭据文件\n\n` +
+                          `此操作不可恢复！请输入 "DELETE" 确认：`;
+
+    const userInput = prompt(confirmMessage);
+    console.log('[BatchDelete] 用户输入:', userInput);
+
+    if (userInput !== 'DELETE') {
+        if (userInput !== null) {
+            showToast('删除已取消：确认文本不正确', 'info');
+        }
+        console.log('[BatchDelete] 用户取消删除操作');
+        return;
+    }
+
+    try {
+        showToast('正在批量删除，请稍候...', 'info');
+
+        const deleteUrl = `/providers/${encodeURIComponent(providerType)}/batch-delete`;
+        console.log('[BatchDelete] 准备发送DELETE请求:', deleteUrl);
+
+        const response = await window.apiClient.delete(deleteUrl);
+        console.log('[BatchDelete] 服务器响应:', response);
+
+        if (response.success) {
+            let message = `成功删除 ${response.deletedCount} 个配置`;
+
+            if (response.deletedCredFiles && response.deletedCredFiles.length > 0) {
+                message += `，已删除 ${response.deletedCredFiles.length} 个凭据文件`;
+            }
+
+            showToast(message, 'success');
+
+            // 重新加载配置
+            await window.apiClient.post('/reload-config');
+
+            // 清空用量查询页面的数据
+            const usageContent = document.getElementById('usageContent');
+            if (usageContent) {
+                usageContent.innerHTML = '<div class="usage-empty"><i class="fas fa-chart-bar"></i><p>点击"刷新用量"按钮获取授权文件用量信息</p></div>';
+            }
+
+            // 关闭模态框
+            const modalElement = document.querySelector('.provider-modal');
+            if (modalElement) {
+                modalElement.remove();
+            }
+
+            // 刷新主页面的提供商卡片
+            if (typeof window.loadProviderPools === 'function') {
+                await window.loadProviderPools();
+            }
+        } else {
+            showToast('批量删除失败', 'error');
+        }
+    } catch (error) {
+        console.error('批量删除失败:', error);
+        showToast(`批量删除失败: ${error.message}`, 'error');
+    }
+}
+
+/**
  * 检测单个提供商配置
  * @param {string} uuid - 提供商UUID
  * @param {Event} event - 事件对象
  */
 async function checkSingleProvider(uuid, event) {
     event.stopPropagation();
-    
+
     const providerDetail = event.target.closest('.provider-item-detail');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
     const btn = event.target.closest('button');
     const originalHtml = btn.innerHTML;
-    
+
+    // 设置超时时间（30秒）
+    const TIMEOUT_MS = 30000;
+    let timeoutId;
+
     try {
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
         showToast('正在检测...', 'info');
-        
-        const response = await window.apiClient.post(
+
+        // 创建超时 Promise
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+                reject(new Error('检测超时（30秒）'));
+            }, TIMEOUT_MS);
+        });
+
+        // 创建请求 Promise
+        const requestPromise = window.apiClient.post(
             `/providers/${encodeURIComponent(providerType)}/${uuid}/health-check`,
             {}
         );
-        
+
+        // 竞速：哪个先完成用哪个
+        const response = await Promise.race([requestPromise, timeoutPromise]);
+
+        // 清除超时
+        clearTimeout(timeoutId);
+
         if (response.success) {
             const result = response.result;
             if (result.success) {
@@ -1448,16 +1594,17 @@ async function checkSingleProvider(uuid, event) {
             } else {
                 showToast(`检测失败: ${result.errorMessage || '未知错误'}`, 'error');
             }
-            
+
             // 重新加载配置
             await window.apiClient.post('/reload-config');
-            
+
             // 刷新提供商配置显示
             await refreshProviderConfig(providerType);
         } else {
             showToast('检测失败: ' + (response.error || '未知错误'), 'error');
         }
     } catch (error) {
+        if (timeoutId) clearTimeout(timeoutId);
         console.error('检测失败:', error);
         showToast(`检测失败: ${error.message}`, 'error');
     } finally {
@@ -1502,6 +1649,204 @@ function renderNotSupportedModelsSelector(uuid, models, notSupportedModels = [])
     container.innerHTML = html;
 }
 
+/**
+ * 处理搜索输入
+ * @param {string} searchText - 搜索文本
+ */
+function handleProviderSearch(searchText) {
+    const keyword = searchText.trim().toLowerCase();
+
+    if (!keyword) {
+        // 搜索框为空，显示所有提供商
+        filteredProviders = currentProviders;
+    } else {
+        // 根据 UUID 或备注过滤
+        filteredProviders = currentProviders.filter(provider => {
+            const uuid = (provider.uuid || '').toLowerCase();
+            const comment = (provider._comment || '').toLowerCase();
+            return uuid.includes(keyword) || comment.includes(keyword);
+        });
+    }
+
+    // 重置到第一页
+    currentPage = 1;
+
+    // 重新渲染列表
+    updateProviderList();
+}
+
+/**
+ * 清除搜索
+ */
+function clearSearch() {
+    const searchInput = document.getElementById('providerSearchInput');
+    if (searchInput) {
+        searchInput.value = '';
+        handleProviderSearch('');
+    }
+}
+
+/**
+ * 更新提供商列表显示
+ */
+function updateProviderList() {
+    const providerList = document.getElementById('providerList');
+    const totalPages = Math.ceil(filteredProviders.length / PROVIDERS_PER_PAGE);
+
+    if (providerList) {
+        providerList.innerHTML = renderProviderListPaginated(filteredProviders, currentPage);
+    }
+
+    // 更新分页控件
+    const paginationContainers = document.querySelectorAll('.pagination-container');
+    if (totalPages > 1) {
+        paginationContainers.forEach(container => {
+            const position = container.getAttribute('data-position');
+            container.outerHTML = renderPagination(currentPage, totalPages, filteredProviders.length, position);
+        });
+    } else {
+        // 移除分页控件
+        paginationContainers.forEach(container => container.remove());
+    }
+
+    // 重新加载当前页的模型列表
+    const startIndex = (currentPage - 1) * PROVIDERS_PER_PAGE;
+    const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, filteredProviders.length);
+    const pageProviders = filteredProviders.slice(startIndex, endIndex);
+    loadModelsForProviderType(currentProviderType, pageProviders);
+
+    // 更新选中状态显示
+    updateSelectedCount();
+}
+
+/**
+ * 处理单个提供商的复选框变化
+ * @param {string} uuid - 提供商UUID
+ * @param {boolean} checked - 是否选中
+ */
+function handleProviderCheckboxChange(uuid, checked) {
+    if (checked) {
+        selectedProviderUUIDs.add(uuid);
+    } else {
+        selectedProviderUUIDs.delete(uuid);
+    }
+
+    updateSelectedCount();
+    updateSelectAllCheckbox();
+}
+
+/**
+ * 切换全选状态
+ * @param {boolean} checked - 是否全选
+ */
+function toggleSelectAll(checked) {
+    // 获取当前页面显示的所有提供商
+    const startIndex = (currentPage - 1) * PROVIDERS_PER_PAGE;
+    const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, filteredProviders.length);
+    const pageProviders = filteredProviders.slice(startIndex, endIndex);
+
+    pageProviders.forEach(provider => {
+        if (checked) {
+            selectedProviderUUIDs.add(provider.uuid);
+        } else {
+            selectedProviderUUIDs.delete(provider.uuid);
+        }
+    });
+
+    // 更新所有复选框的状态
+    const checkboxes = document.querySelectorAll('.provider-checkbox');
+    checkboxes.forEach(checkbox => {
+        checkbox.checked = checked;
+    });
+
+    updateSelectedCount();
+}
+
+/**
+ * 更新全选复选框状态
+ */
+function updateSelectAllCheckbox() {
+    const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+    if (!selectAllCheckbox) return;
+
+    // 获取当前页面显示的所有提供商
+    const startIndex = (currentPage - 1) * PROVIDERS_PER_PAGE;
+    const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, filteredProviders.length);
+    const pageProviders = filteredProviders.slice(startIndex, endIndex);
+
+    // 检查当前页是否全部选中
+    const allChecked = pageProviders.length > 0 &&
+                       pageProviders.every(p => selectedProviderUUIDs.has(p.uuid));
+
+    selectAllCheckbox.checked = allChecked;
+}
+
+/**
+ * 更新选中数量显示
+ */
+function updateSelectedCount() {
+    const selectedCountEl = document.getElementById('selectedCount');
+    const batchDeleteBtn = document.getElementById('batchDeleteBtn');
+
+    if (selectedCountEl) {
+        selectedCountEl.textContent = `已选中 ${selectedProviderUUIDs.size} 个`;
+    }
+
+    if (batchDeleteBtn) {
+        batchDeleteBtn.disabled = selectedProviderUUIDs.size === 0;
+    }
+}
+
+/**
+ * 批量删除选中的提供商
+ */
+async function batchDeleteSelected() {
+    const selectedCount = selectedProviderUUIDs.size;
+
+    if (selectedCount === 0) {
+        showToast('请先选择要删除的提供商', 'warning');
+        return;
+    }
+
+    const confirmMessage = `确定要删除选中的 ${selectedCount} 个提供商吗？\n\n⚠️ 此操作将同时删除关联的凭据文件，不可恢复！`;
+
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+
+    const selectedUUIDs = Array.from(selectedProviderUUIDs);
+    let successCount = 0;
+    let failCount = 0;
+
+    showToast(`正在删除 ${selectedCount} 个提供商...`, 'info');
+
+    for (const uuid of selectedUUIDs) {
+        try {
+            await window.apiClient.delete(`/providers/${encodeURIComponent(currentProviderType)}/${uuid}`);
+            successCount++;
+        } catch (error) {
+            console.error(`Failed to delete provider ${uuid}:`, error);
+            failCount++;
+        }
+    }
+
+    // 重新加载配置
+    await window.apiClient.post('/reload-config');
+
+    // 显示结果
+    if (failCount === 0) {
+        showToast(`成功删除 ${successCount} 个提供商`, 'success');
+    } else {
+        showToast(`删除完成：成功 ${successCount} 个，失败 ${failCount} 个`, 'warning');
+    }
+
+    // 清空选中状态
+    selectedProviderUUIDs.clear();
+
+    // 刷新列表
+    await refreshProviderConfig(currentProviderType);
+}
+
 // 导出所有函数，并挂载到window对象供HTML调用
 export {
     showProviderManagerModal,
@@ -1517,10 +1862,16 @@ export {
     toggleProviderStatus,
     resetAllProvidersHealth,
     performHealthCheck,
+    batchDeleteAllProviders,
     checkSingleProvider,
     loadModelsForProviderType,
     renderNotSupportedModelsSelector,
-    goToProviderPage
+    goToProviderPage,
+    handleProviderSearch,
+    clearSearch,
+    handleProviderCheckboxChange,
+    toggleSelectAll,
+    batchDeleteSelected
 };
 
 // 将函数挂载到window对象
@@ -1535,5 +1886,11 @@ window.addProvider = addProvider;
 window.toggleProviderStatus = toggleProviderStatus;
 window.resetAllProvidersHealth = resetAllProvidersHealth;
 window.performHealthCheck = performHealthCheck;
+window.batchDeleteAllProviders = batchDeleteAllProviders;
 window.checkSingleProvider = checkSingleProvider;
 window.goToProviderPage = goToProviderPage;
+window.handleProviderSearch = handleProviderSearch;
+window.clearSearch = clearSearch;
+window.handleProviderCheckboxChange = handleProviderCheckboxChange;
+window.toggleSelectAll = toggleSelectAll;
+window.batchDeleteSelected = batchDeleteSelected;

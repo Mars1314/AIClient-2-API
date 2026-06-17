@@ -37,9 +37,15 @@ export function stopCurrentProviderRefresh() {
  */
 async function loadCurrentProviders() {
     try {
-        const response = await fetch('/api/providers/current');
-        const data = await response.json();
-        
+        // 使用带认证的 apiClient
+        const apiClient = window.apiClient;
+        if (!apiClient) {
+            console.error('[Current Provider] API client not available');
+            return;
+        }
+
+        const data = await apiClient.get('/providers/current');
+
         if (data.success) {
             currentProvidersData = data.currentProviders;
             updateCurrentProviderDisplay();
@@ -54,25 +60,83 @@ async function loadCurrentProviders() {
  */
 function updateCurrentProviderDisplay() {
     if (!currentProvidersData) return;
-    
+
     // 查找所有 provider modal
     const modals = document.querySelectorAll('.provider-modal');
-    
+
     modals.forEach(modal => {
         const providerType = modal.getAttribute('data-provider-type');
         const currentProvider = currentProvidersData[providerType];
-        
+
         if (!currentProvider) return;
-        
+
         // 更新 modal 标题，显示当前使用的账号
         updateModalTitle(modal, providerType, currentProvider);
-        
+
         // 高亮当前使用的 provider
         highlightCurrentProvider(modal, currentProvider.uuid);
-        
+
+        // 在每个账号卡片上显示"当前在用"标识
+        updateProviderCardsCurrentBadge(modal, currentProvider.uuid);
+
         // 显示指纹信息
         updateFingerprintInfo(modal, currentProvider);
     });
+}
+
+/**
+ * 更新每个账号卡片上的"当前在用"标识
+ */
+function updateProviderCardsCurrentBadge(modal, currentUuid) {
+    console.log('[Current Provider] Updating badge for UUID:', currentUuid);
+
+    // 移除所有账号卡片上的"当前在用"标签
+    const allProviderItems = modal.querySelectorAll('.provider-item-detail');
+    console.log('[Current Provider] Found provider items:', allProviderItems.length);
+
+    allProviderItems.forEach(item => {
+        const providerName = item.querySelector('.provider-name');
+        if (providerName) {
+            // 移除旧标签（如果存在）
+            const oldBadge = providerName.querySelector('.current-in-use-badge');
+            if (oldBadge) {
+                console.log('[Current Provider] Removing old badge from:', item.getAttribute('data-uuid'));
+                oldBadge.remove();
+            }
+        }
+    });
+
+    // 在当前账号卡片上添加"当前在用"标签
+    const currentItem = modal.querySelector(`.provider-item-detail[data-uuid="${currentUuid}"]`);
+    console.log('[Current Provider] Found current item:', currentItem ? 'YES' : 'NO');
+
+    if (currentItem) {
+        const providerName = currentItem.querySelector('.provider-name');
+        console.log('[Current Provider] Found provider name:', providerName ? 'YES' : 'NO');
+
+        if (providerName) {
+            // 检查是否已存在标签，避免重复添加
+            let currentBadge = providerName.querySelector('.current-in-use-badge');
+            if (!currentBadge) {
+                console.log('[Current Provider] Adding badge to:', currentUuid);
+                currentBadge = document.createElement('span');
+                currentBadge.className = 'current-in-use-badge';
+                currentBadge.innerHTML = `
+                    <span style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                          color: white; padding: 4px 10px; border-radius: 12px;
+                          font-size: 11px; font-weight: 600; margin-left: 8px;
+                          box-shadow: 0 2px 6px rgba(102, 126, 234, 0.3);
+                          display: inline-flex; align-items: center; gap: 4px;">
+                        <i class="fas fa-play-circle"></i> 当前在用
+                    </span>
+                `;
+                providerName.appendChild(currentBadge);
+                console.log('[Current Provider] Badge added successfully');
+            } else {
+                console.log('[Current Provider] Badge already exists, skipping');
+            }
+        }
+    }
 }
 
 /**
@@ -116,40 +180,14 @@ function highlightCurrentProvider(modal, currentUuid) {
         item.classList.remove('current-active');
         item.style.border = '';
         item.style.boxShadow = '';
-        
-        // 移除旧的"当前使用"标签
-        const oldBadge = item.querySelector('.current-using-badge');
-        if (oldBadge) {
-            oldBadge.remove();
-        }
     });
-    
+
     // 高亮当前的
     const currentItem = modal.querySelector(`.provider-item-detail[data-uuid="${currentUuid}"]`);
     if (currentItem) {
         currentItem.classList.add('current-active');
         currentItem.style.border = '2px solid #667eea';
         currentItem.style.boxShadow = '0 4px 12px rgba(102, 126, 234, 0.3)';
-        
-        // 添加"当前使用"标签到provider-name后面
-        const providerName = currentItem.querySelector('.provider-name');
-        if (providerName) {
-            let currentBadge = currentItem.querySelector('.current-using-badge');
-            if (!currentBadge) {
-                currentBadge = document.createElement('span');
-                currentBadge.className = 'current-using-badge';
-                currentBadge.innerHTML = `
-                    <span style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                          color: white; padding: 4px 10px; border-radius: 12px; 
-                          font-size: 11px; font-weight: 600; margin-left: 8px;
-                          box-shadow: 0 2px 6px rgba(102, 126, 234, 0.3);
-                          display: inline-flex; align-items: center; gap: 4px;">
-                        <i class="fas fa-play-circle"></i> 当前使用
-                    </span>
-                `;
-                providerName.appendChild(currentBadge);
-            }
-        }
     }
 }
 

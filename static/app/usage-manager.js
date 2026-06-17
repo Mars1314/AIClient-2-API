@@ -1,7 +1,9 @@
 // 用量管理模块
 
 import { showToast } from './utils.js';
-import { getAuthHeaders } from './auth.js';
+
+// 从 window 全局变量获取 getAuthHeaders
+const getAuthHeaders = window.getAuthHeaders;
 
 /**
  * 初始化用量管理功能
@@ -18,6 +20,7 @@ export function initUsageManager() {
 
 /**
  * 加载用量数据（优先从缓存读取）
+ * 只加载 Claude Kiro OAuth 提供商
  */
 export async function loadUsage() {
     const loadingEl = document.getElementById('usageLoading');
@@ -32,8 +35,8 @@ export async function loadUsage() {
     if (emptyEl) emptyEl.style.display = 'none';
 
     try {
-        // 不带 refresh 参数，优先读取缓存
-        const response = await fetch('/api/usage', {
+        // 只查询 claude-kiro-oauth，不带 refresh 参数，优先读取缓存
+        const response = await fetch('/api/usage/claude-kiro-oauth', {
             method: 'GET',
             headers: getAuthHeaders()
         });
@@ -43,13 +46,33 @@ export async function loadUsage() {
         }
 
         const data = await response.json();
-        
+
         // 隐藏加载状态
         if (loadingEl) loadingEl.style.display = 'none';
-        
+
+        // 过滤有效实例
+        const validInstances = (data.instances || []).filter(instance => {
+            // 过滤掉服务实例未初始化的
+            if (instance.error === '服务实例未初始化') {
+                return false;
+            }
+            // 过滤掉已禁用的提供商
+            if (instance.isDisabled) {
+                return false;
+            }
+            return true;
+        });
+
+        // 清空容器
+        if (contentEl) contentEl.innerHTML = '';
+
         // 渲染用量数据
-        renderUsageData(data, contentEl);
-        
+        if (validInstances.length > 0) {
+            renderProviderTypeUsage('claude-kiro-oauth', validInstances, contentEl);
+        } else {
+            if (emptyEl) emptyEl.style.display = 'block';
+        }
+
         // 更新最后更新时间
         if (lastUpdateEl) {
             if (data.fromCache && data.timestamp) {
@@ -60,7 +83,7 @@ export async function loadUsage() {
         }
     } catch (error) {
         console.error('获取用量数据失败:', error);
-        
+
         if (loadingEl) loadingEl.style.display = 'none';
         if (errorEl) {
             errorEl.style.display = 'block';
@@ -74,6 +97,7 @@ export async function loadUsage() {
 
 /**
  * 刷新用量数据（强制从服务器获取最新数据）
+ * 只查询 Kiro 提供商，分批查询每批3个账号，实时渲染
  */
 export async function refreshUsage() {
     const loadingEl = document.getElementById('usageLoading');
@@ -90,33 +114,76 @@ export async function refreshUsage() {
     if (refreshBtn) refreshBtn.disabled = true;
 
     try {
-        // 带 refresh=true 参数，强制刷新
-        const response = await fetch('/api/usage?refresh=true', {
-            method: 'GET',
-            headers: getAuthHeaders()
-        });
+        // 清空内容容器，准备渲染
+        if (contentEl) contentEl.innerHTML = '';
 
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
+        // 只查询 claude-kiro-oauth 提供商
+        const providerType = 'claude-kiro-oauth';
+        const BATCH_SIZE = 3; // 每批3个账号
 
-        const data = await response.json();
-        
+        console.log('[UsageManager] 开始分批查询 Kiro 用量');
+
+        // 第一次查询获取总数
+        let batchIndex = 0;
+        let totalBatches = 1;
+        let totalCount = 0;
+        let allInstances = [];
+
+        do {
+            if (loadingEl) {
+                loadingEl.innerHTML = `<i class="fas fa-spinner fa-spin"></i> 正在加载用量数据... (批次 ${batchIndex + 1}/${totalBatches || '?'})`;
+            }
+
+            try {
+                const batchResult = await fetchProviderUsageBatch(providerType, batchIndex, BATCH_SIZE);
+
+                // 更新总批次数
+                if (batchIndex === 0) {
+                    totalBatches = batchResult.totalBatches;
+                    totalCount = batchResult.totalCount;
+                    console.log(`[UsageManager] 总共 ${totalCount} 个账号，分 ${totalBatches} 批查询`);
+                }
+
+                // 收集实例数据
+                allInstances = allInstances.concat(batchResult.instances);
+
+                // 立即渲染当前已获取的所有数据
+                if (contentEl) {
+                    contentEl.innerHTML = ''; // 清空
+                    if (allInstances.length > 0) {
+                        renderProviderTypeUsage(providerType, allInstances, contentEl);
+                    }
+                }
+
+                console.log(`[UsageManager] 批次 ${batchIndex + 1}/${totalBatches} 完成，当前已获取 ${allInstances.length}/${totalCount} 个账号`);
+
+                batchIndex++;
+            } catch (batchError) {
+                console.error(`[UsageManager] 批次 ${batchIndex + 1} 查询失败:`, batchError);
+                showToast(`批次 ${batchIndex + 1} 查询失败: ${batchError.message}`, 'warning');
+                break; // 出错则停止查询
+            }
+
+        } while (batchIndex < totalBatches);
+
         // 隐藏加载状态
         if (loadingEl) loadingEl.style.display = 'none';
-        
-        // 渲染用量数据
-        renderUsageData(data, contentEl);
-        
+
         // 更新最后更新时间
         if (lastUpdateEl) {
             lastUpdateEl.textContent = `上次更新: ${new Date().toLocaleString()}`;
         }
 
-        showToast('用量数据已刷新', 'success');
+        if (allInstances.length === 0) {
+            if (emptyEl) emptyEl.style.display = 'block';
+            showToast('没有可用的 Kiro 配置', 'info');
+        } else {
+            showToast(`用量数据已刷新，共 ${allInstances.length} 个账号`, 'success');
+        }
+
     } catch (error) {
         console.error('获取用量数据失败:', error);
-        
+
         if (loadingEl) loadingEl.style.display = 'none';
         if (errorEl) {
             errorEl.style.display = 'block';
@@ -125,11 +192,87 @@ export async function refreshUsage() {
                 errorMsgEl.textContent = error.message || '获取用量数据失败';
             }
         }
-        
+
         showToast('获取用量数据失败: ' + error.message, 'error');
     } finally {
         if (refreshBtn) refreshBtn.disabled = false;
     }
+}
+
+/**
+ * 查询单个批次的提供商用量
+ * @param {string} providerType - 提供商类型
+ * @param {number} batchIndex - 批次索引（从0开始）
+ * @param {number} batchSize - 每批数量
+ * @returns {Promise<Object>} 批次用量数据
+ */
+async function fetchProviderUsageBatch(providerType, batchIndex, batchSize) {
+    const response = await fetch(
+        `/api/usage/${encodeURIComponent(providerType)}?refresh=true&force=true&batch=${batchIndex}&batchSize=${batchSize}`,
+        {
+            method: 'GET',
+            headers: getAuthHeaders()
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return await response.json();
+}
+
+/**
+ * 查询单个提供商类型的用量
+ * @param {string} providerType - 提供商类型
+ * @returns {Promise<Object>} 用量数据
+ */
+async function fetchProviderUsage(providerType) {
+    const response = await fetch(`/api/usage/${encodeURIComponent(providerType)}?refresh=true&force=true`, {
+        method: 'GET',
+        headers: getAuthHeaders()
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return {
+        providerType,
+        instances: data.instances || []
+    };
+}
+
+/**
+ * 渲染单个提供商类型的用量数据
+ * @param {string} providerType - 提供商类型
+ * @param {Array} instances - 实例数组
+ * @param {HTMLElement} container - 容器元素
+ */
+function renderProviderTypeUsage(providerType, instances, container) {
+    if (!container) return;
+
+    // 过滤有效实例
+    const validInstances = instances.filter(instance => {
+        // 过滤掉服务实例未初始化的
+        if (instance.error === '服务实例未初始化') {
+            return false;
+        }
+        // 过滤掉已禁用的提供商
+        if (instance.isDisabled) {
+            return false;
+        }
+        return true;
+    });
+
+    if (validInstances.length === 0) {
+        return; // 没有有效实例，不渲染
+    }
+
+    // 创建分组容器并添加到页面
+    const groupContainer = createProviderGroup(providerType, validInstances);
+    container.appendChild(groupContainer);
 }
 
 /**
@@ -201,19 +344,19 @@ function renderUsageData(data, container) {
  */
 function createProviderGroup(providerType, instances) {
     const groupContainer = document.createElement('div');
-    groupContainer.className = 'usage-provider-group collapsed';
-    
+    groupContainer.className = 'usage-provider-group'; // 移除 collapsed 类，默认展开
+
     const providerDisplayName = getProviderDisplayName(providerType);
     const providerIcon = getProviderIcon(providerType);
     const instanceCount = instances.length;
     const successCount = instances.filter(i => i.success).length;
-    
+
     // 分组头部（可点击折叠）
     const header = document.createElement('div');
     header.className = 'usage-group-header';
     header.innerHTML = `
         <div class="usage-group-title">
-            <i class="fas fa-chevron-right toggle-icon"></i>
+            <i class="fas fa-chevron-down toggle-icon"></i>
             <i class="${providerIcon} provider-icon"></i>
             <span class="provider-name">${providerDisplayName}</span>
             <span class="instance-count">${instanceCount} 个实例</span>

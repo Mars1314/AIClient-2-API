@@ -1,7 +1,9 @@
 // Kiro Token 批量导入模块
 
 import { showToast } from './utils.js';
-import { getAuthHeaders } from './auth.js';
+
+// 从 window 全局变量获取 getAuthHeaders
+const getAuthHeaders = window.getAuthHeaders;
 
 /**
  * 初始化 Kiro Token 批量导入功能

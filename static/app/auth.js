@@ -314,16 +314,10 @@ window.login = login;
 window.AuthManager = AuthManager;
 window.ApiClient = ApiClient;
 
-// ES6 模块导出
-export {
-    AuthManager,
-    ApiClient,
-    authManager,
-    apiClient,
-    initAuth,
-    logout,
-    login,
-    getAuthHeaders
-};
+// 导出其他函数供模块使用
+window.authManager = authManager;
+window.apiClient = apiClient;
+window.initAuth = initAuth;
+window.getAuthHeaders = getAuthHeaders;
 
 console.log('认证模块已加载');
